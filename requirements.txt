@@ -1,0 +1,6 @@
+pyrogram==2.0.106
+tgcrypto==1.2.5
+ffmpeg-python==0.2.0
+openai-whisper==20231117
+deep-translator==1.11.4
+edge-tts==6.1.12
