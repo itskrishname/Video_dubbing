@@ -28,7 +28,7 @@ def run_ffmpeg(stream):
     ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
 
 def transcribe_audio(audio_path):
-    return model.transcribe(audio_path, language="en")
+    return model.transcribe(audio_path, language="en", fp16=False)
 
 def translate_text(text):
     return GoogleTranslator(source='auto', target='hi').translate(text)
@@ -48,6 +48,18 @@ async def update_status(message: Message, text: str):
         await message.edit_text(f"✦ {text} ✦")
     except MessageNotModified:
         pass
+
+@app.on_message(filters.command("start") & filters.private)
+async def start_command(client: Client, message: Message):
+    if message.from_user.id != Config.OWNER_ID:
+        await message.reply_text("⛔ Hello! I am a private Video Dubbing bot and only my owner can use me.")
+        return
+
+    await message.reply_text(
+        "👋 Hello there!\n\n"
+        "I am your Automated Video Dubbing Bot.\n"
+        "Send me a video file, and I will translate and dub it for you into English or Hindi using AI."
+    )
 
 @app.on_message(filters.video & filters.private)
 async def handle_video(client: Client, message: Message):
