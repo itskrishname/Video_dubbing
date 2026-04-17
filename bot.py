@@ -25,6 +25,9 @@ print("Loading Whisper Model...")
 model = whisper.load_model("base")
 print("Whisper Model Loaded.")
 
+# Store ongoing sessions for the review flow
+SESSIONS = {}
+
 # Blocking sync functions to run in executor
 def run_ffmpeg(stream):
     ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
@@ -40,10 +43,14 @@ def translate_text(text, target_lang):
         # Use AI model for natural, conversational Hinglish instead of formal translation
         try:
             prompt = (
-                "Translate the following English text to natural, casual Hinglish (Hindi written in English alphabet). "
-                "Keep common English words as they are (e.g., time, phone, shop, please). "
-                "Output ONLY the translated text without any quotes, explanations, or surrounding text.\n\n"
-                f"Text: {text}"
+                "You are an expert translator converting English into extremely casual, Gen-Z / conversational 'Hinglish' "
+                "(Hindi written in the English alphabet, like WhatsApp chats). \n"
+                "CRITICAL RULES:\n"
+                "1. DO NOT use formal or 'Shuddh' Hindi words (e.g., do NOT use kripya, samay, pratiksha, upayog).\n"
+                "2. KEEP common English words exactly as they are (e.g., time, phone, please, check, use, problem, store, shopping).\n"
+                "3. Make it sound completely natural, exactly how Indian friends chat online.\n"
+                "4. Output ONLY the translated text. No quotes, no explanations, no chat.\n\n"
+                f"Text to translate: {text}"
             )
             response = g4f.ChatCompletion.create(
                 model='openai',
@@ -61,22 +68,21 @@ def translate_text(text, target_lang):
     # Translate to Hindi Devanagari
     return GoogleTranslator(source='auto', target='hi').translate(text)
 
-def generate_srt(transcription_result, target_lang, srt_path):
-    segments = transcription_result.get("segments", [])
+def translate_segments_to_srt_string(segments, target_lang):
+    srt_content = ""
+    for i, segment in enumerate(segments, start=1):
+        start = format_timestamp(segment["start"])
+        end = format_timestamp(segment["end"])
+        text = segment["text"].strip()
 
-    with open(srt_path, "w", encoding="utf-8") as f:
-        for i, segment in enumerate(segments, start=1):
-            start = format_timestamp(segment["start"])
-            end = format_timestamp(segment["end"])
-            text = segment["text"].strip()
+        if target_lang != "en":
+            # Translate each subtitle segment individually
+            text = translate_text(text, target_lang)
 
-            if target_lang != "en":
-                # Translate each subtitle segment individually
-                text = translate_text(text, target_lang)
-
-            f.write(f"{i}\n")
-            f.write(f"{start} --> {end}\n")
-            f.write(f"{text}\n\n")
+        srt_content += f"{i}\n"
+        srt_content += f"{start} --> {end}\n"
+        srt_content += f"{text}\n\n"
+    return srt_content
 
 def format_timestamp(seconds: float) -> str:
     hours = int(seconds // 3600)
@@ -177,24 +183,55 @@ async def process_video_callback(client: Client, callback_query: CallbackQuery):
     # Run the processing pipeline
     asyncio.create_task(process_video(client, video_msg, status_msg, action, lang_code))
 
+@app.on_callback_query(filters.regex("^review_"))
+async def review_callback(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    if user_id != Config.OWNER_ID:
+        await callback_query.answer("⛔ Unauthorized.", show_alert=True)
+        return
+
+    choice = callback_query.data.split("_")[1]
+    session = SESSIONS.get(user_id)
+
+    if not session:
+        await callback_query.answer("❌ Session expired or not found.", show_alert=True)
+        return
+
+    await callback_query.answer()
+
+    if choice == "cancel":
+        await update_status(session["status_msg"], "❌ Process Canceled.")
+        cleanup_session(user_id)
+    elif choice == "regen":
+        await generate_and_send_review(client, user_id)
+    elif choice == "done":
+        asyncio.create_task(finalize_video(client, user_id))
+
 async def process_video(client: Client, video_msg: Message, status_msg: Message, action: str, lang_code: str):
     # Temporary file paths
+    user_id = video_msg.from_user.id
+
+    # Store session info
     timestamp = int(time.time())
-    orig_video_path = f"/tmp/input_{timestamp}.mp4"
-    audio_path = f"/tmp/audio_{timestamp}.wav"
-    tts_audio_path = f"/tmp/tts_{timestamp}.mp3"
-    synced_audio_path = f"/tmp/synced_{timestamp}.mp3"
-    srt_path = f"/tmp/subtitles_{timestamp}.srt"
-    final_video_path = f"/tmp/final_{timestamp}.mp4"
+    SESSIONS[user_id] = {
+        "timestamp": timestamp,
+        "video_msg": video_msg,
+        "status_msg": status_msg,
+        "action": action,
+        "lang_code": lang_code,
+        "orig_video_path": f"/tmp/input_{timestamp}.mp4",
+        "audio_path": f"/tmp/audio_{timestamp}.wav",
+        "transcription_result": None
+    }
 
     try:
         # 1. Download Video
-        await video_msg.download(file_name=orig_video_path)
+        await video_msg.download(file_name=SESSIONS[user_id]["orig_video_path"])
 
         # 2. Extract Audio
         await update_status(status_msg, "ᴇxᴛʀᴀᴄᴛɪɴɢ ᴀᴜᴅɪᴏ...")
         try:
-            stream = ffmpeg.input(orig_video_path).output(audio_path, acodec='pcm_s16le', ac=1, ar='16k')
+            stream = ffmpeg.input(SESSIONS[user_id]["orig_video_path"]).output(SESSIONS[user_id]["audio_path"], acodec='pcm_s16le', ac=1, ar='16k')
             await asyncio.to_thread(run_ffmpeg, stream)
         except ffmpeg.Error as e:
             print(e.stderr.decode())
@@ -203,24 +240,106 @@ async def process_video(client: Client, video_msg: Message, status_msg: Message,
 
         # 3. Transcribe with Whisper
         await update_status(status_msg, "ᴛʀᴀɴsᴄʀɪʙɪɴɢ ᴀᴜᴅɪᴏ...")
-        result = await asyncio.to_thread(transcribe_audio, audio_path)
+        result = await asyncio.to_thread(transcribe_audio, SESSIONS[user_id]["audio_path"])
         transcribed_text = result["text"].strip()
 
         if not transcribed_text:
             await update_status(status_msg, "❌ Could not detect any speech in the video.")
             return
 
+        SESSIONS[user_id]["transcription_result"] = result
+        SESSIONS[user_id]["transcribed_text"] = transcribed_text
+
+        # 4. Generate Initial Translation for Review
+        await generate_and_send_review(client, user_id)
+
+    except Exception as e:
+        print(f"Error processing video: {e}")
+        await update_status(status_msg, f"❌ An error occurred: {str(e)}")
+        cleanup_session(user_id)
+
+async def generate_and_send_review(client: Client, user_id: int):
+    session = SESSIONS.get(user_id)
+    if not session:
+        return
+
+    status_msg = session["status_msg"]
+    action = session["action"]
+    lang_code = session["lang_code"]
+
+    await update_status(status_msg, "ɢᴇɴᴇʀᴀᴛɪɴɢ ᴛʀᴀɴsʟᴀᴛɪᴏɴ ꜰᴏʀ ʀᴇᴠɪᴇᴡ...")
+
+    try:
+        if action == "sub":
+            # For subtitles, generate the whole SRT string
+            result = session["transcription_result"]
+            segments = result.get("segments", [])
+            translated_script = await asyncio.to_thread(translate_segments_to_srt_string, segments, lang_code)
+            session["final_srt_content"] = translated_script
+
+            # Show a preview of the first few lines to the user
+            preview_text = "\n".join(translated_script.split("\n")[:15]) + "\n... (truncated)"
+        else:
+            # For dubbing, generate full translated text
+            transcribed_text = session["transcribed_text"]
+            translated_script = await asyncio.to_thread(translate_text, transcribed_text, lang_code)
+            session["final_dub_text"] = translated_script
+            preview_text = translated_script
+
+        # Send Review Message
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Done (Proceed)", callback_data="review_done")],
+            [InlineKeyboardButton("🔄 Regenerate", callback_data="review_regen")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="review_cancel")]
+        ])
+
+        await status_msg.edit_text(
+            f"👀 **Please Review the Translated Script:**\n\n"
+            f"```text\n{preview_text}\n```\n\n"
+            f"If it looks good, click **Done** to finish processing.",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        print(f"Error generating review: {e}")
+        await update_status(status_msg, f"❌ Error generating review: {e}")
+        cleanup_session(user_id)
+
+async def finalize_video(client: Client, user_id: int):
+    session = SESSIONS.get(user_id)
+    if not session:
+        return
+
+    status_msg = session["status_msg"]
+    video_msg = session["video_msg"]
+    action = session["action"]
+    lang_code = session["lang_code"]
+
+    orig_video_path = session["orig_video_path"]
+    audio_path = session["audio_path"]
+
+    # Define outputs
+    tts_audio_path = f"/tmp/tts_{session['timestamp']}.mp3"
+    synced_audio_path = f"/tmp/synced_{session['timestamp']}.mp3"
+    srt_path = f"/tmp/subtitles_{session['timestamp']}.srt"
+    final_video_path = f"/tmp/final_{session['timestamp']}.mp4"
+
+    session["tts_audio_path"] = tts_audio_path
+    session["synced_audio_path"] = synced_audio_path
+    session["srt_path"] = srt_path
+    session["final_video_path"] = final_video_path
+
+    try:
         if action == "sub":
             # --- SUBTITLE GENERATION (HARDSUBS) ---
-            await update_status(status_msg, "ɢᴇɴᴇʀᴀᴛɪɴɢ sᴜʙᴛɪᴛʟᴇs...")
-            await asyncio.to_thread(generate_srt, result, lang_code, srt_path)
+            await update_status(status_msg, "ɢᴇɴᴇʀᴀᴛɪɴɢ sᴜʙᴛɪᴛʟᴇ ꜰɪʟᴇ...")
+            srt_content = session["final_srt_content"]
+            with open(srt_path, "w", encoding="utf-8") as f:
+                f.write(srt_content)
 
             await update_status(status_msg, "ʙᴜʀɴɪɴɢ sᴜʙᴛɪᴛʟᴇs ɪɴᴛᴏ ᴠɪᴅᴇᴏ...")
             try:
-                # FFMPEG requires escaping colons and backslashes in paths for the subtitles filter
                 escaped_srt_path = srt_path.replace("\\", "\\\\").replace(":", "\\:")
 
-                # Using Mukta font which supports both English and Hindi Devanagari to prevent box rendering issues
                 fonts_dir = os.path.abspath("fonts").replace("\\", "\\\\").replace(":", "\\:")
                 style = "FontName=Mukta,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2"
 
@@ -229,28 +348,23 @@ async def process_video(client: Client, video_msg: Message, status_msg: Message,
                 audio_stream = in_file.audio
 
                 stream = ffmpeg.output(video_stream, audio_stream, final_video_path, vcodec='libx264', acodec='copy')
-
                 await asyncio.to_thread(run_ffmpeg, stream)
             except ffmpeg.Error as e:
                 print(f"subtitles error: {e.stderr.decode()}")
                 await update_status(status_msg, "❌ Error burning subtitles to video.")
+                cleanup_session(user_id)
                 return
 
         else:
             # --- DUBBING GENERATION ---
             await update_status(status_msg, "ɢᴇɴᴇʀᴀᴛɪɴɢ ᴀɪ ᴠᴏɪᴄᴇ...")
+            translated_text = session["final_dub_text"]
 
-            translated_text = await asyncio.to_thread(translate_text, transcribed_text, lang_code)
-
-            # Select Best Free Voice depending on language
-            # We enforce standard good voices since user wants free + good
             voice_id = "hi-IN-MadhurNeural" if lang_code in ["hi", "hinglish"] else "en-US-ChristopherNeural"
 
-            # Generate TTS audio
             communicate = edge_tts.Communicate(translated_text, voice_id)
             await communicate.save(tts_audio_path)
 
-            # 5. Audio Sync
             await update_status(status_msg, "sʏɴᴄɪɴɢ ᴀᴜᴅɪᴏ ᴡɪᴛʜ ᴠɪᴅᴇᴏ...")
             orig_duration = get_duration(orig_video_path)
             tts_duration = get_duration(tts_audio_path)
@@ -277,14 +391,12 @@ async def process_video(client: Client, video_msg: Message, status_msg: Message,
 
                     stream = ffmpeg.output(stream, synced_audio_path, ar=44100)
                     await asyncio.to_thread(run_ffmpeg, stream)
-
                 except ffmpeg.Error as e:
                     print(f"atempo error: {e.stderr.decode()}")
                     synced_audio_path = tts_audio_path
             else:
                 synced_audio_path = tts_audio_path
 
-            # 6. Merge
             await update_status(status_msg, "ᴍᴇʀɢɪɴɢ ᴀᴜᴅɪᴏ & ᴠɪᴅᴇᴏ...")
 
             video_input = ffmpeg.input(orig_video_path)
@@ -296,9 +408,9 @@ async def process_video(client: Client, video_msg: Message, status_msg: Message,
             except ffmpeg.Error as e:
                 print(f"merge error: {e.stderr.decode()}")
                 await update_status(status_msg, "❌ Error merging audio and video.")
+                cleanup_session(user_id)
                 return
 
-        # 7. Upload
         await update_status(status_msg, "ᴜᴘʟᴏᴀᴅɪɴɢ ᴘʀᴏᴄᴇssᴇᴅ ᴠɪᴅᴇᴏ...")
 
         action_str = "Dubbed" if action == "dub" else "Subtitled"
@@ -309,18 +421,34 @@ async def process_video(client: Client, video_msg: Message, status_msg: Message,
         await status_msg.delete()
 
     except Exception as e:
-        print(f"Error processing video: {e}")
+        print(f"Error finalizing video: {e}")
         await update_status(status_msg, f"❌ An error occurred: {str(e)}")
 
     finally:
-        # Cleanup
-        files_to_remove = [orig_video_path, audio_path, tts_audio_path, synced_audio_path, srt_path, final_video_path]
-        for f in files_to_remove:
-            if os.path.exists(f):
-                try:
-                    os.remove(f)
-                except Exception as e:
-                    print(f"Failed to remove {f}: {e}")
+        cleanup_session(user_id)
+
+def cleanup_session(user_id: int):
+    session = SESSIONS.get(user_id)
+    if not session:
+        return
+
+    paths = [
+        session.get("orig_video_path"),
+        session.get("audio_path"),
+        session.get("tts_audio_path"),
+        session.get("synced_audio_path"),
+        session.get("srt_path"),
+        session.get("final_video_path")
+    ]
+
+    for p in paths:
+        if p and os.path.exists(p):
+            try:
+                os.remove(p)
+            except Exception as e:
+                print(f"Failed to remove {p}: {e}")
+
+    del SESSIONS[user_id]
 
 if __name__ == "__main__":
     print("Bot is starting...")
