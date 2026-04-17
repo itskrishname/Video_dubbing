@@ -5,6 +5,7 @@ import ffmpeg
 import whisper
 import edge_tts
 from deep_translator import GoogleTranslator
+from indic_transliteration import sanscript
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 from pyrogram.errors import MessageNotModified
@@ -33,11 +34,18 @@ def transcribe_audio(audio_path):
 def translate_text(text, target_lang):
     if target_lang == "en":
         return text
-    # GoogleTranslator supports 'hi'
-    # For 'hinglish', there isn't a direct target in google translate.
-    # Usually, translating to Hindi often works, but let's just use Hindi target.
-    # If there was a specific hinglish API, we'd use it here.
-    return GoogleTranslator(source='auto', target='hi').translate(text)
+
+    # Translate to Hindi Devanagari first
+    hindi_text = GoogleTranslator(source='auto', target='hi').translate(text)
+
+    # If Hinglish is requested, transliterate Devanagari to ITRANS (Latin script)
+    if target_lang == "hinglish":
+        hinglish_text = sanscript.transliterate(hindi_text, sanscript.DEVANAGARI, sanscript.ITRANS)
+        # ITRANS sometimes keeps specific casing. We can clean it up or leave it as is.
+        # It's generally very readable Hindi-in-English format.
+        return hinglish_text.capitalize()
+
+    return hindi_text
 
 def generate_srt(transcription_result, target_lang, srt_path):
     segments = transcription_result.get("segments", [])
