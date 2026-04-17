@@ -197,10 +197,13 @@ async def process_video(client: Client, video_msg: Message, status_msg: Message,
             try:
                 # FFMPEG requires escaping colons and backslashes in paths for the subtitles filter
                 escaped_srt_path = srt_path.replace("\\", "\\\\").replace(":", "\\:")
-                style = "FontName=Arial,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2"
+
+                # Using Mukta font which supports both English and Hindi Devanagari to prevent box rendering issues
+                fonts_dir = os.path.abspath("fonts").replace("\\", "\\\\").replace(":", "\\:")
+                style = "FontName=Mukta,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2"
 
                 in_file = ffmpeg.input(orig_video_path)
-                video_stream = in_file.video.filter('subtitles', escaped_srt_path, force_style=style)
+                video_stream = in_file.video.filter('subtitles', escaped_srt_path, fontsdir=fonts_dir, force_style=style)
                 audio_stream = in_file.audio
 
                 stream = ffmpeg.output(video_stream, audio_stream, final_video_path, vcodec='libx264', acodec='copy')
