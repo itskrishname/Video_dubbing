@@ -4,6 +4,7 @@ import time
 import ffmpeg
 import whisper
 import edge_tts
+import g4f
 from deep_translator import GoogleTranslator
 from indic_transliteration import sanscript
 from pyrogram import Client, filters
@@ -35,17 +36,30 @@ def translate_text(text, target_lang):
     if target_lang == "en":
         return text
 
-    # Translate to Hindi Devanagari first
-    hindi_text = GoogleTranslator(source='auto', target='hi').translate(text)
-
-    # If Hinglish is requested, transliterate Devanagari to ITRANS (Latin script)
     if target_lang == "hinglish":
-        hinglish_text = sanscript.transliterate(hindi_text, sanscript.DEVANAGARI, sanscript.ITRANS)
-        # ITRANS sometimes keeps specific casing. We can clean it up or leave it as is.
-        # It's generally very readable Hindi-in-English format.
-        return hinglish_text.capitalize()
+        # Use AI model for natural, conversational Hinglish instead of formal translation
+        try:
+            prompt = (
+                "Translate the following English text to natural, casual Hinglish (Hindi written in English alphabet). "
+                "Keep common English words as they are (e.g., time, phone, shop, please). "
+                "Output ONLY the translated text without any quotes, explanations, or surrounding text.\n\n"
+                f"Text: {text}"
+            )
+            response = g4f.ChatCompletion.create(
+                model='openai',
+                provider=g4f.Provider.PollinationsAI,
+                messages=[{'role': 'user', 'content': prompt}]
+            )
+            return response.strip()
+        except Exception as e:
+            print(f"Hinglish AI Translation Error: {e}")
+            # Fallback to transliterated formal Hindi if AI fails
+            hindi_text = GoogleTranslator(source='auto', target='hi').translate(text)
+            hinglish_text = sanscript.transliterate(hindi_text, sanscript.DEVANAGARI, sanscript.ITRANS)
+            return hinglish_text.capitalize()
 
-    return hindi_text
+    # Translate to Hindi Devanagari
+    return GoogleTranslator(source='auto', target='hi').translate(text)
 
 def generate_srt(transcription_result, target_lang, srt_path):
     segments = transcription_result.get("segments", [])
