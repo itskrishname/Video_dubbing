@@ -43,14 +43,21 @@ def translate_text(text, target_lang):
         # Use AI model for natural, conversational Hinglish instead of formal translation
         try:
             prompt = (
-                "You are an expert translator converting English into extremely casual, Gen-Z / conversational 'Hinglish' "
-                "(Hindi written in the English alphabet, like WhatsApp chats). \n"
+                "You are an expert localizer. Your job is to translate the given English text into casual 'Hinglish' "
+                "(Hindi written ONLY in the English alphabet, exactly like a WhatsApp chat).\n\n"
                 "CRITICAL RULES:\n"
-                "1. DO NOT use formal or 'Shuddh' Hindi words (e.g., do NOT use kripya, samay, pratiksha, upayog).\n"
-                "2. KEEP common English words exactly as they are (e.g., time, phone, please, check, use, problem, store, shopping).\n"
-                "3. Make it sound completely natural, exactly how Indian friends chat online.\n"
-                "4. Output ONLY the translated text. No quotes, no explanations, no chat.\n\n"
-                f"Text to translate: {text}"
+                "1. NEVER output pure English. It must be Hindi grammar/structure.\n"
+                "2. NEVER output Devanagari script (e.g., नमस्ते is WRONG. Namaste is CORRECT).\n"
+                "3. Keep common English nouns/verbs if they are used in daily life (e.g., use 'time' instead of 'samay', 'phone', 'wait').\n"
+                "4. Output ONLY the translation. No quotes, no explanations.\n\n"
+                "EXAMPLES:\n"
+                "English: I want to eat an apple.\n"
+                "Hinglish: Mujhe ek apple khana hai.\n\n"
+                "English: What time are we going to the store?\n"
+                "Hinglish: Hum log store kis time ja rahe hain?\n\n"
+                "English: I will check my phone and call you later.\n"
+                "Hinglish: Main apna phone check karke tumhe baad mein call karta hu.\n\n"
+                f"Now, translate this English text into Hinglish:\n{text}"
             )
             response = g4f.ChatCompletion.create(
                 model='openai',
@@ -203,8 +210,10 @@ async def review_callback(client: Client, callback_query: CallbackQuery):
         await update_status(session["status_msg"], "❌ Process Canceled.")
         cleanup_session(user_id)
     elif choice == "regen":
+        await session["status_msg"].edit_reply_markup(reply_markup=None)
         await generate_and_send_review(client, user_id)
     elif choice == "done":
+        await session["status_msg"].edit_reply_markup(reply_markup=None)
         asyncio.create_task(finalize_video(client, user_id))
 
 async def process_video(client: Client, video_msg: Message, status_msg: Message, action: str, lang_code: str):
