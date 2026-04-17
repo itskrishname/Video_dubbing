@@ -23,32 +23,6 @@ print("Loading Whisper Model...")
 model = whisper.load_model("base")
 print("Whisper Model Loaded.")
 
-# Voice configurations
-VOICES = {
-    "hi": [
-        {"id": "hi-IN-MadhurNeural", "name": "1. Boy (Madhur)", "type": "male"},
-        {"id": "hi-IN-SwaraNeural", "name": "2. Girl (Swara)", "type": "female"},
-        # Falling back to Indian English for more Hindi accent varieties if needed
-        {"id": "en-IN-PrabhatNeural", "name": "3. Boy (Prabhat)", "type": "male"},
-        {"id": "en-IN-NeerjaNeural", "name": "4. Girl (Neerja)", "type": "female"},
-        {"id": "en-IN-NeerjaExpressiveNeural", "name": "5. Girl (Neerja Expressive)", "type": "female"},
-    ],
-    "en": [
-        {"id": "en-US-ChristopherNeural", "name": "1. Boy (Christopher)", "type": "male"},
-        {"id": "en-US-JennyNeural", "name": "2. Girl (Jenny)", "type": "female"},
-        {"id": "en-US-GuyNeural", "name": "3. Boy (Guy)", "type": "male"},
-        {"id": "en-US-AriaNeural", "name": "4. Girl (Aria)", "type": "female"},
-        {"id": "en-US-AndrewNeural", "name": "5. Boy (Andrew)", "type": "male"},
-    ]
-}
-
-# User state to store selected voice. Default to English Christopher.
-# In a real database this should persist, but for a simple bot memory is fine.
-USER_SETTINGS = {
-    "lang_code": "en",
-    "voice_id": "en-US-ChristopherNeural"
-}
-
 # Blocking sync functions to run in executor
 def run_ffmpeg(stream):
     ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
@@ -56,8 +30,38 @@ def run_ffmpeg(stream):
 def transcribe_audio(audio_path):
     return model.transcribe(audio_path, language="en", fp16=False)
 
-def translate_text(text):
+def translate_text(text, target_lang):
+    if target_lang == "en":
+        return text
+    # GoogleTranslator supports 'hi'
+    # For 'hinglish', there isn't a direct target in google translate.
+    # Usually, translating to Hindi often works, but let's just use Hindi target.
+    # If there was a specific hinglish API, we'd use it here.
     return GoogleTranslator(source='auto', target='hi').translate(text)
+
+def generate_srt(transcription_result, target_lang, srt_path):
+    segments = transcription_result.get("segments", [])
+
+    with open(srt_path, "w", encoding="utf-8") as f:
+        for i, segment in enumerate(segments, start=1):
+            start = format_timestamp(segment["start"])
+            end = format_timestamp(segment["end"])
+            text = segment["text"].strip()
+
+            if target_lang != "en":
+                # Translate each subtitle segment individually
+                text = translate_text(text, target_lang)
+
+            f.write(f"{i}\n")
+            f.write(f"{start} --> {end}\n")
+            f.write(f"{text}\n\n")
+
+def format_timestamp(seconds: float) -> str:
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds % 1) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 # Helper function to get duration of audio/video using ffprobe
 def get_duration(filename):
@@ -83,86 +87,9 @@ async def start_command(client: Client, message: Message):
 
     await message.reply_text(
         "👋 Hello there!\n\n"
-        "I am your Automated Video Dubbing Bot.\n"
-        "1. First, use /voice to choose your preferred dubbing voice.\n"
-        "2. Then, send me a video file and I will dub it automatically!\n"
+        "I am your Automated Video Processing Bot.\n"
+        "Send me a video file, and I will Dub it or add Subtitles for you!"
     )
-
-@app.on_message(filters.command("voice") & filters.private)
-async def voice_command(client: Client, message: Message):
-    if message.from_user.id != Config.OWNER_ID:
-        await message.reply_text("⛔ Unauthorized.")
-        return
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🇮🇳 Hindi", callback_data="lang_hi"),
-         InlineKeyboardButton("🇺🇸 English", callback_data="lang_en")]
-    ])
-    await message.reply_text(
-        "🗣 **Voice Settings**\n\nChoose the language first:",
-        reply_markup=keyboard
-    )
-
-@app.on_callback_query(filters.regex("^lang_"))
-async def language_selection_callback(client: Client, callback_query: CallbackQuery):
-    if callback_query.from_user.id != Config.OWNER_ID:
-        await callback_query.answer("⛔ Unauthorized.", show_alert=True)
-        return
-
-    lang = callback_query.data.split("_")[1]
-    USER_SETTINGS["lang_code"] = lang
-
-    # Build keyboard for 1 to 5 voices
-    buttons = []
-    for voice in VOICES[lang]:
-        buttons.append([InlineKeyboardButton(voice["name"], callback_data=f"voice_{voice['id']}")])
-
-    buttons.append([InlineKeyboardButton("🔙 Back to Language", callback_data="back_lang")])
-
-    await callback_query.message.edit_text(
-        f"🗣 **Voice Settings ({'Hindi' if lang == 'hi' else 'English'})**\n\n"
-        "Tap a voice to set it and hear a quick preview 👀:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-@app.on_callback_query(filters.regex("^back_lang$"))
-async def back_to_lang_callback(client: Client, callback_query: CallbackQuery):
-    if callback_query.from_user.id != Config.OWNER_ID:
-        return
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🇮🇳 Hindi", callback_data="lang_hi"),
-         InlineKeyboardButton("🇺🇸 English", callback_data="lang_en")]
-    ])
-    await callback_query.message.edit_text(
-        "🗣 **Voice Settings**\n\nChoose the language first:",
-        reply_markup=keyboard
-    )
-
-@app.on_callback_query(filters.regex("^voice_"))
-async def voice_selection_callback(client: Client, callback_query: CallbackQuery):
-    if callback_query.from_user.id != Config.OWNER_ID:
-        await callback_query.answer("⛔ Unauthorized.", show_alert=True)
-        return
-
-    voice_id = callback_query.data.replace("voice_", "")
-    USER_SETTINGS["voice_id"] = voice_id
-
-    await callback_query.answer("Voice updated! Generating preview... 👀", show_alert=False)
-
-    # Generate Preview
-    preview_text = "Hello! This is a preview of my voice. Aap mujhe video bhej sakte hain." if USER_SETTINGS["lang_code"] == "hi" else "Hello! This is a preview of my voice. Send me a video and I will dub it."
-    preview_path = f"/tmp/preview_{int(time.time())}.mp3"
-
-    try:
-        communicate = edge_tts.Communicate(preview_text, voice_id)
-        await communicate.save(preview_path)
-        await callback_query.message.reply_audio(audio=preview_path, title="Voice Preview", performer="AI Dub Bot")
-    except Exception as e:
-        print(f"Preview error: {e}")
-        await callback_query.message.reply_text("❌ Error generating preview.")
-    finally:
-        if os.path.exists(preview_path):
-            os.remove(preview_path)
 
 @app.on_message(filters.video & filters.private)
 async def handle_video(client: Client, message: Message):
@@ -170,22 +97,72 @@ async def handle_video(client: Client, message: Message):
         await message.reply_text("⛔ You are not authorized to use this bot.")
         return
 
-    # Instantly start processing with saved settings
-    status_msg = await message.reply_text("✦ ᴅᴏᴡɴʟᴏᴀᴅɪɴɢ ᴠɪᴅᴇᴏ... ✦", quote=True)
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎙️ Dub Video", callback_data="menu_dub"),
+            InlineKeyboardButton("📝 Subtitle Video", callback_data="menu_sub")
+        ]
+    ])
+
+    await message.reply_text(
+        "🎥 Video received! What would you like to do?",
+        reply_markup=keyboard,
+        quote=True
+    )
+
+@app.on_callback_query(filters.regex("^menu_"))
+async def main_menu_callback(client: Client, callback_query: CallbackQuery):
+    if callback_query.from_user.id != Config.OWNER_ID:
+        await callback_query.answer("⛔ Unauthorized.", show_alert=True)
+        return
+
+    action = callback_query.data.split("_")[1] # 'dub' or 'sub'
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🇮🇳 Hindi", callback_data=f"{action}_hi"),
+            InlineKeyboardButton("🇺🇸 English", callback_data=f"{action}_en")
+        ],
+        [
+            InlineKeyboardButton("🇮🇳🇺🇸 Hinglish", callback_data=f"{action}_hinglish")
+        ]
+    ])
+
+    action_text = "Dubbing" if action == "dub" else "Subtitles"
+
+    await callback_query.message.edit_text(
+        f"Select the language for **{action_text}**:",
+        reply_markup=keyboard
+    )
+
+@app.on_callback_query(filters.regex("^(dub|sub)_"))
+async def process_video_callback(client: Client, callback_query: CallbackQuery):
+    if callback_query.from_user.id != Config.OWNER_ID:
+        await callback_query.answer("⛔ Unauthorized.", show_alert=True)
+        return
+
+    action, lang_code = callback_query.data.split("_")
+
+    await callback_query.answer()
+    status_msg = callback_query.message
+    await update_status(status_msg, "ᴅᴏᴡɴʟᴏᴀᴅɪɴɢ ᴠɪᴅᴇᴏ...")
+
+    video_msg = status_msg.reply_to_message
+    if not video_msg or not video_msg.video:
+        await update_status(status_msg, "❌ Error: Could not find the original video.")
+        return
 
     # Run the processing pipeline
-    asyncio.create_task(process_video(client, message, status_msg))
+    asyncio.create_task(process_video(client, video_msg, status_msg, action, lang_code))
 
-async def process_video(client: Client, video_msg: Message, status_msg: Message):
-    lang_code = USER_SETTINGS["lang_code"]
-    voice_id = USER_SETTINGS["voice_id"]
-
+async def process_video(client: Client, video_msg: Message, status_msg: Message, action: str, lang_code: str):
     # Temporary file paths
     timestamp = int(time.time())
     orig_video_path = f"/tmp/input_{timestamp}.mp4"
     audio_path = f"/tmp/audio_{timestamp}.wav"
     tts_audio_path = f"/tmp/tts_{timestamp}.mp3"
     synced_audio_path = f"/tmp/synced_{timestamp}.mp3"
+    srt_path = f"/tmp/subtitles_{timestamp}.srt"
     final_video_path = f"/tmp/final_{timestamp}.mp4"
 
     try:
@@ -211,83 +188,96 @@ async def process_video(client: Client, video_msg: Message, status_msg: Message)
             await update_status(status_msg, "❌ Could not detect any speech in the video.")
             return
 
-        # 4. Translate & TTS
-        await update_status(status_msg, "ɢᴇɴᴇʀᴀᴛɪɴɢ ᴀɪ ᴠᴏɪᴄᴇ...")
+        if action == "sub":
+            # --- SUBTITLE GENERATION (HARDSUBS) ---
+            await update_status(status_msg, "ɢᴇɴᴇʀᴀᴛɪɴɢ sᴜʙᴛɪᴛʟᴇs...")
+            await asyncio.to_thread(generate_srt, result, lang_code, srt_path)
 
-        if lang_code == "hi":
-            # Translate to Hindi
-            translated_text = await asyncio.to_thread(translate_text, transcribed_text)
-            tts_text = translated_text
+            await update_status(status_msg, "ʙᴜʀɴɪɴɢ sᴜʙᴛɪᴛʟᴇs ɪɴᴛᴏ ᴠɪᴅᴇᴏ...")
+            try:
+                # FFMPEG requires escaping colons and backslashes in paths for the subtitles filter
+                escaped_srt_path = srt_path.replace("\\", "\\\\").replace(":", "\\:")
+
+                stream = ffmpeg.input(orig_video_path).output(
+                    final_video_path,
+                    vf=f"subtitles={escaped_srt_path}",
+                    acodec='copy'
+                )
+                await asyncio.to_thread(run_ffmpeg, stream)
+            except ffmpeg.Error as e:
+                print(f"subtitles error: {e.stderr.decode()}")
+                await update_status(status_msg, "❌ Error burning subtitles to video.")
+                return
+
         else:
-            # Keep English
-            tts_text = transcribed_text
+            # --- DUBBING GENERATION ---
+            await update_status(status_msg, "ɢᴇɴᴇʀᴀᴛɪɴɢ ᴀɪ ᴠᴏɪᴄᴇ...")
 
-        # Generate TTS audio using user's selected voice
-        communicate = edge_tts.Communicate(tts_text, voice_id)
-        await communicate.save(tts_audio_path)
+            translated_text = await asyncio.to_thread(translate_text, transcribed_text, lang_code)
 
-        # 5. Audio Sync
-        await update_status(status_msg, "sʏɴᴄɪɴɢ ᴀᴜᴅɪᴏ ᴡɪᴛʜ ᴠɪᴅᴇᴏ...")
-        orig_duration = get_duration(orig_video_path)
-        tts_duration = get_duration(tts_audio_path)
+            # Select Best Free Voice depending on language
+            # We enforce standard good voices since user wants free + good
+            voice_id = "hi-IN-MadhurNeural" if lang_code in ["hi", "hinglish"] else "en-US-ChristopherNeural"
 
-        if orig_duration > 0 and tts_duration > 0:
-            tempo = tts_duration / orig_duration
+            # Generate TTS audio
+            communicate = edge_tts.Communicate(translated_text, voice_id)
+            await communicate.save(tts_audio_path)
 
-            # Since we want the new audio to perfectly fit the old duration:
-            # tempo = tts_duration / orig_duration
-            # FFMPEG atempo filter limits are 0.5 to 100.0 per filter.
-            # We chain multiple filters to achieve highly precise, extreme tempo changes if needed for lipsync.
+            # 5. Audio Sync
+            await update_status(status_msg, "sʏɴᴄɪɴɢ ᴀᴜᴅɪᴏ ᴡɪᴛʜ ᴠɪᴅᴇᴏ...")
+            orig_duration = get_duration(orig_video_path)
+            tts_duration = get_duration(tts_audio_path)
 
-            tempo_filters = []
-            current_tempo = tempo
+            if orig_duration > 0 and tts_duration > 0:
+                tempo = tts_duration / orig_duration
+                tempo_filters = []
+                current_tempo = tempo
 
-            while current_tempo > 2.0:
-                tempo_filters.append(2.0)
-                current_tempo /= 2.0
-            while current_tempo < 0.5:
-                tempo_filters.append(0.5)
-                current_tempo /= 0.5
+                while current_tempo > 2.0:
+                    tempo_filters.append(2.0)
+                    current_tempo /= 2.0
+                while current_tempo < 0.5:
+                    tempo_filters.append(0.5)
+                    current_tempo /= 0.5
 
-            if current_tempo != 1.0:
-                # Keep high precision for the remaining tempo
-                tempo_filters.append(round(current_tempo, 4))
+                if current_tempo != 1.0:
+                    tempo_filters.append(round(current_tempo, 4))
+
+                try:
+                    stream = ffmpeg.input(tts_audio_path)
+                    for f in tempo_filters:
+                        stream = stream.filter('atempo', f)
+
+                    stream = ffmpeg.output(stream, synced_audio_path, ar=44100)
+                    await asyncio.to_thread(run_ffmpeg, stream)
+
+                except ffmpeg.Error as e:
+                    print(f"atempo error: {e.stderr.decode()}")
+                    synced_audio_path = tts_audio_path
+            else:
+                synced_audio_path = tts_audio_path
+
+            # 6. Merge
+            await update_status(status_msg, "ᴍᴇʀɢɪɴɢ ᴀᴜᴅɪᴏ & ᴠɪᴅᴇᴏ...")
+
+            video_input = ffmpeg.input(orig_video_path)
+            audio_input = ffmpeg.input(synced_audio_path)
 
             try:
-                # Apply the tempo filters
-                stream = ffmpeg.input(tts_audio_path)
-                for f in tempo_filters:
-                    stream = stream.filter('atempo', f)
-
-                stream = ffmpeg.output(stream, synced_audio_path, ar=44100) # standardize sample rate for better quality
+                stream = ffmpeg.output(video_input.video, audio_input.audio, final_video_path, vcodec='copy', acodec='aac', strict='experimental')
                 await asyncio.to_thread(run_ffmpeg, stream)
-
             except ffmpeg.Error as e:
-                # If atempo fails (e.g. out of bounds), just use the unsynced TTS audio
-                print(f"atempo error: {e.stderr.decode()}")
-                synced_audio_path = tts_audio_path
-        else:
-            synced_audio_path = tts_audio_path
-
-        # 6. Merge
-        await update_status(status_msg, "ᴍᴇʀɢɪɴɢ ᴀᴜᴅɪᴏ & ᴠɪᴅᴇᴏ...")
-
-        video_input = ffmpeg.input(orig_video_path)
-        audio_input = ffmpeg.input(synced_audio_path)
-
-        try:
-            stream = ffmpeg.output(video_input.video, audio_input.audio, final_video_path, vcodec='copy', acodec='aac', strict='experimental')
-            await asyncio.to_thread(run_ffmpeg, stream)
-        except ffmpeg.Error as e:
-            print(f"merge error: {e.stderr.decode()}")
-            await update_status(status_msg, "❌ Error merging audio and video.")
-            return
+                print(f"merge error: {e.stderr.decode()}")
+                await update_status(status_msg, "❌ Error merging audio and video.")
+                return
 
         # 7. Upload
-        await update_status(status_msg, "ᴜᴘʟᴏᴀᴅɪɴɢ ᴅᴜʙʙᴇᴅ ᴠɪᴅᴇᴏ...")
+        await update_status(status_msg, "ᴜᴘʟᴏᴀᴅɪɴɢ ᴘʀᴏᴄᴇssᴇᴅ ᴠɪᴅᴇᴏ...")
+
+        action_str = "Dubbed" if action == "dub" else "Subtitled"
         await video_msg.reply_video(
             video=final_video_path,
-            caption="✨ Dubbed Video Processed Successfully!"
+            caption=f"✨ {action_str} Video Processed Successfully!"
         )
         await status_msg.delete()
 
@@ -297,7 +287,7 @@ async def process_video(client: Client, video_msg: Message, status_msg: Message)
 
     finally:
         # Cleanup
-        files_to_remove = [orig_video_path, audio_path, tts_audio_path, synced_audio_path, final_video_path]
+        files_to_remove = [orig_video_path, audio_path, tts_audio_path, synced_audio_path, srt_path, final_video_path]
         for f in files_to_remove:
             if os.path.exists(f):
                 try:
