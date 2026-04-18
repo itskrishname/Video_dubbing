@@ -17,8 +17,8 @@ To run this bot, you must set the following environment variables:
 | --- | --- | --- |
 | `BOT_TOKEN` | The bot token obtained from [@BotFather](https://t.me/BotFather) | *None* (Required) |
 | `OWNER_ID` | Your Telegram User ID to restrict access | *None* (Required) |
-| `TELEGRAM_API` | Your API ID from [my.telegram.org](https://my.telegram.org) | `28891870` |
-| `TELEGRAM_HASH` | Your API Hash from [my.telegram.org](https://my.telegram.org) | `ffc3794690bf254d2867ac58fd293a60` |
+| `TELEGRAM_API` | Your API ID from [my.telegram.org](https://my.telegram.org) | *Pre-configured* |
+| `TELEGRAM_HASH` | Your API Hash from [my.telegram.org](https://my.telegram.org) | *Pre-configured* |
 
 ## Deployment on Heroku
 

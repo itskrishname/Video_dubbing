@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import time
 import ffmpeg
@@ -20,9 +21,9 @@ app = Client(
     bot_token=Config.BOT_TOKEN
 )
 
-# Load Whisper model (Base model)
+# Load Whisper model (Small model for higher VPS accuracy)
 print("Loading Whisper Model...")
-model = whisper.load_model("base")
+model = whisper.load_model("small")
 print("Whisper Model Loaded.")
 
 # Store ongoing sessions for the review flow
@@ -30,10 +31,15 @@ SESSIONS = {}
 
 # Blocking sync functions to run in executor
 def run_ffmpeg(stream):
+    # Pass threads=0 globally to allow FFMPEG to use all available VPS CPU cores
+    stream = ffmpeg.global_args(stream, '-threads', '0')
     ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
 
 def transcribe_audio(audio_path):
-    return model.transcribe(audio_path, language="en", fp16=False)
+    import torch
+    # Auto-detect if CUDA is available on the VPS, otherwise fallback to CPU-friendly fp16=False
+    fp16 = torch.cuda.is_available()
+    return model.transcribe(audio_path, language="en", fp16=fp16)
 
 def translate_text(text, target_lang):
     if target_lang == "en":
@@ -109,15 +115,21 @@ def time_formatter(seconds: float) -> str:
     else:
         return f"{secs}s"
 
+# Track last message edit times to avoid FloodWait
+PROGRESS_CACHE = {}
+
 async def progress_callback(current, total, message: Message, start_time, operation_name):
     now = time.time()
     diff = now - start_time
 
+    msg_id = message.id
+    last_updated = PROGRESS_CACHE.get(msg_id, 0)
+
     # Update only every 2 seconds to avoid Telegram FloodWait
-    if getattr(message, "last_updated", 0) + 2 > now and current < total:
+    if last_updated + 2 > now and current < total:
         return
 
-    setattr(message, "last_updated", now)
+    PROGRESS_CACHE[msg_id] = now
 
     percent = round((current / total) * 100, 2)
 
@@ -177,6 +189,41 @@ async def start_command(client: Client, message: Message):
         "I am your Automated Video Processing Bot.\n"
         "Send me a video file, and I will Dub it or add Subtitles for you!"
     )
+
+@app.on_message(filters.command("update") & filters.private)
+async def update_command(client: Client, message: Message):
+    if message.from_user.id != Config.OWNER_ID:
+        await message.reply_text("⛔ Unauthorized.")
+        return
+
+    status_msg = await message.reply_text("🔄 Pulling latest updates from Git...")
+    try:
+        # Run git pull
+        process = await asyncio.create_subprocess_shell(
+            "git pull",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+
+        output = stdout.decode().strip()
+        error = stderr.decode().strip()
+
+        response_text = f"✅ **Update Status:**\n\n**Output:**\n`{output}`"
+        if error:
+            response_text += f"\n\n**Warnings/Errors:**\n`{error}`"
+
+        if "Already up to date" in output:
+            await status_msg.edit_text(response_text)
+            return
+
+        await status_msg.edit_text(response_text + "\n\n♻️ **Restarting bot to apply changes...**")
+
+        # Restart the process
+        os.execv(sys.executable, ['python3'] + sys.argv)
+
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Failed to update: {str(e)}")
 
 @app.on_message(filters.video & filters.private)
 async def handle_video(client: Client, message: Message):
