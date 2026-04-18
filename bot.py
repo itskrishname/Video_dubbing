@@ -35,8 +35,7 @@ SESSIONS = {}
 # Blocking sync functions to run in executor
 def run_ffmpeg(stream):
     # Pass threads=0 globally to allow FFMPEG to use all available VPS CPU cores
-    stream = stream.global_args('-threads', '0')
-    ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
+    ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True, global_args=['-threads', '0'])
 
 def transcribe_audio(audio_path):
     import torch
@@ -44,7 +43,7 @@ def transcribe_audio(audio_path):
     fp16 = torch.cuda.is_available()
     return model.transcribe(audio_path, language="en", fp16=fp16)
 
-def translate_text(text, target_lang):
+async def translate_text(text, target_lang):
     if target_lang == "en":
         return text
 
@@ -68,7 +67,8 @@ def translate_text(text, target_lang):
                 "Hinglish: Main apna phone check karke tumhe baad mein call karta hu.\n\n"
                 f"Now, translate this English text into Hinglish:\n{text}"
             )
-            response = g4f.ChatCompletion.create(
+            # Async call to the provider to avoid blocking
+            response = await g4f.ChatCompletion.create_async(
                 model='openai',
                 provider=g4f.Provider.PollinationsAI,
                 messages=[{'role': 'user', 'content': prompt}]
@@ -77,27 +77,38 @@ def translate_text(text, target_lang):
         except Exception as e:
             print(f"Hinglish AI Translation Error: {e}")
             # Fallback to transliterated formal Hindi if AI fails
-            hindi_text = GoogleTranslator(source='auto', target='hi').translate(text)
+            hindi_text = await asyncio.to_thread(GoogleTranslator(source='auto', target='hi').translate, text)
             hinglish_text = sanscript.transliterate(hindi_text, sanscript.DEVANAGARI, sanscript.ITRANS)
             return hinglish_text.capitalize()
 
     # Translate to Hindi Devanagari
-    return GoogleTranslator(source='auto', target='hi').translate(text)
+    return await asyncio.to_thread(GoogleTranslator(source='auto', target='hi').translate, text)
 
-def translate_segments_to_srt_string(segments, target_lang):
+async def translate_segments_to_srt_string(segments, target_lang):
     srt_content = ""
-    for i, segment in enumerate(segments, start=1):
+
+    async def process_segment(i, segment):
         start = format_timestamp(segment["start"])
         end = format_timestamp(segment["end"])
         text = segment["text"].strip()
 
         if target_lang != "en":
-            # Translate each subtitle segment individually
-            text = translate_text(text, target_lang)
+            text = await translate_text(text, target_lang)
 
-        srt_content += f"{i}\n"
-        srt_content += f"{start} --> {end}\n"
-        srt_content += f"{text}\n\n"
+        return f"{i}\n{start} --> {end}\n{text}\n\n"
+
+    # Process all segments concurrently
+    tasks = [process_segment(i, seg) for i, seg in enumerate(segments, start=1)]
+    # Use gather with a semaphore or directly to massively speed up translations
+    # Pollinations/GoogleTranslate are fairly robust, so direct gather is often fine for normal length clips
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for r in results:
+        if isinstance(r, Exception):
+            print(f"Translation Error in segment: {r}")
+        else:
+            srt_content += r
+
     return srt_content
 
 def format_timestamp(seconds: float) -> str:
@@ -392,7 +403,7 @@ async def generate_and_send_review(client: Client, user_id: int):
             # For subtitles, generate the whole SRT string
             result = session["transcription_result"]
             segments = result.get("segments", [])
-            translated_script = await asyncio.to_thread(translate_segments_to_srt_string, segments, lang_code)
+            translated_script = await translate_segments_to_srt_string(segments, lang_code)
             session["final_srt_content"] = translated_script
 
             # Show a preview of the first few lines to the user
@@ -400,7 +411,7 @@ async def generate_and_send_review(client: Client, user_id: int):
         else:
             # For dubbing, generate full translated text
             transcribed_text = session["transcribed_text"]
-            translated_script = await asyncio.to_thread(translate_text, transcribed_text, lang_code)
+            translated_script = await translate_text(transcribed_text, lang_code)
             session["final_dub_text"] = translated_script
             preview_text = translated_script
 
