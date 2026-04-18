@@ -1,5 +1,11 @@
 import os
 
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file if it exists
+load_dotenv()
+
 class Config:
     # Telegram Bot Token from BotFather
     BOT_TOKEN = os.environ.get("BOT_TOKEN", "")

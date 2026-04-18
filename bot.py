@@ -14,6 +14,9 @@ from pyrogram.errors import MessageNotModified
 from config import Config
 
 # Initialize Pyrogram Client
+if not Config.TELEGRAM_API_ID or not Config.TELEGRAM_API_HASH:
+    raise ValueError("TELEGRAM_API_ID or TELEGRAM_API_HASH is missing. Please check config.py")
+
 app = Client(
     "video_dub_bot",
     api_id=Config.TELEGRAM_API_ID,

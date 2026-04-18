@@ -8,8 +8,6 @@ services:
     volumes:
       - .:/app
     # You can set your environment variables here if you prefer not to hardcode them in config.py
-    environment:
-      - BOT_TOKEN=your_token_here
-      - OWNER_ID=7660990923
-      - TELEGRAM_API=28891870
-      - TELEGRAM_HASH=ffc3794690bf254d2867ac58fd293a60
+    # Read environment variables from .env file
+    env_file:
+      - .env
