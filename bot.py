@@ -98,6 +98,58 @@ def format_timestamp(seconds: float) -> str:
     millis = int((seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
+def time_formatter(seconds: float) -> str:
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    if hours > 0:
+        return f"{hours}h, {minutes}m, {secs}s"
+    elif minutes > 0:
+        return f"{minutes}m, {secs}s"
+    else:
+        return f"{secs}s"
+
+async def progress_callback(current, total, message: Message, start_time, operation_name):
+    now = time.time()
+    diff = now - start_time
+
+    # Update only every 2 seconds to avoid Telegram FloodWait
+    if getattr(message, "last_updated", 0) + 2 > now and current < total:
+        return
+
+    setattr(message, "last_updated", now)
+
+    percent = round((current / total) * 100, 2)
+
+    # Progress Bar [██████▒▒▒▒]
+    filled = int(percent / 10)
+    bar = "█" * filled + "▒" * (10 - filled)
+
+    # Speed (Bytes per second)
+    speed = current / diff if diff > 0 else 0
+    # Speed in MB/s
+    speed_mb = speed / (1024 * 1024)
+
+    # Time Taken
+    time_taken = diff
+
+    # Time Left
+    time_left = (total - current) / speed if speed > 0 else 0
+
+    text = (
+        f"✦ {operation_name} ✦\n\n"
+        f"♻️ᴘʀᴏɢʀᴇss: {percent}% [{bar}]\n\n"
+        f"🕛 ᴛɪᴍᴇ ʟᴇꜰᴛ: {time_formatter(time_left)} ⏱️ ᴛɪᴍᴇ ᴛᴀᴋᴇɴ: {time_formatter(time_taken)}\n"
+        f"ꜱᴘᴇᴇᴅ: {speed_mb:.2f} MB/s"
+    )
+
+    try:
+        await message.edit_text(text)
+    except MessageNotModified:
+        pass
+    except Exception as e:
+        print(f"Progress Error: {e}")
+
 # Helper function to get duration of audio/video using ffprobe
 def get_duration(filename):
     try:
@@ -235,7 +287,12 @@ async def process_video(client: Client, video_msg: Message, status_msg: Message,
 
     try:
         # 1. Download Video
-        await video_msg.download(file_name=SESSIONS[user_id]["orig_video_path"])
+        start_time = time.time()
+        await video_msg.download(
+            file_name=SESSIONS[user_id]["orig_video_path"],
+            progress=progress_callback,
+            progress_args=(status_msg, start_time, "ᴅᴏᴡɴʟᴏᴀᴅɪɴɢ ᴠɪᴅᴇᴏ")
+        )
 
         # 2. Extract Audio
         await update_status(status_msg, "ᴇxᴛʀᴀᴄᴛɪɴɢ ᴀᴜᴅɪᴏ...")
@@ -245,6 +302,7 @@ async def process_video(client: Client, video_msg: Message, status_msg: Message,
         except ffmpeg.Error as e:
             print(e.stderr.decode())
             await update_status(status_msg, "❌ Error extracting audio.")
+            cleanup_session(user_id)
             return
 
         # 3. Transcribe with Whisper
@@ -254,6 +312,7 @@ async def process_video(client: Client, video_msg: Message, status_msg: Message,
 
         if not transcribed_text:
             await update_status(status_msg, "❌ Could not detect any speech in the video.")
+            cleanup_session(user_id)
             return
 
         SESSIONS[user_id]["transcription_result"] = result
@@ -423,9 +482,13 @@ async def finalize_video(client: Client, user_id: int):
         await update_status(status_msg, "ᴜᴘʟᴏᴀᴅɪɴɢ ᴘʀᴏᴄᴇssᴇᴅ ᴠɪᴅᴇᴏ...")
 
         action_str = "Dubbed" if action == "dub" else "Subtitled"
+
+        start_time = time.time()
         await video_msg.reply_video(
             video=final_video_path,
-            caption=f"✨ {action_str} Video Processed Successfully!"
+            caption=f"✨ {action_str} Video Processed Successfully!",
+            progress=progress_callback,
+            progress_args=(status_msg, start_time, "ᴜᴘʟᴏᴀᴅɪɴɢ ᴠɪᴅᴇᴏ")
         )
         await status_msg.delete()
 
