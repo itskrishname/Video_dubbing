@@ -8,6 +8,6 @@ services:
     volumes:
       - .:/app
     # You can set your environment variables here if you prefer not to hardcode them in config.py
-    # Read environment variables from .env file
-    env_file:
-      - .env
+    # You can set your environment variables here if you prefer not to hardcode them in config.py
+    environment:
+      - BOT_TOKEN=your_token_here
