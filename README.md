@@ -20,21 +20,36 @@ To run this bot, you must set the following environment variables:
 | `TELEGRAM_API` | Your API ID from [my.telegram.org](https://my.telegram.org) | *Pre-configured* |
 | `TELEGRAM_HASH` | Your API Hash from [my.telegram.org](https://my.telegram.org) | *Pre-configured* |
 
-## Deployment on Heroku
+## VPS Deployment (Docker Recommended)
 
-Follow these steps to deploy the bot to Heroku:
+Since this bot performs heavy operations using AI and FFMPEG, it is highly recommended to run it on a VPS (Ubuntu/Debian) rather than Heroku.
 
-1. **Create a new Heroku App.**
-2. **Add Buildpacks:**
-   Go to your app's "Settings" > "Buildpacks" and add the following in this order:
-   - `heroku/python` (Official Python buildpack)
-   - `https://github.com/jonathanong/heroku-buildpack-ffmpeg-latest.git` (Third-party FFMPEG buildpack)
-3. **Configure Environment Variables:**
-   Go to "Settings" > "Config Vars" and add the required variables (`BOT_TOKEN`, `OWNER_ID`, `TELEGRAM_API`, `TELEGRAM_HASH`).
-4. **Deploy the Code:**
-   Connect your GitHub repository and deploy the branch, or use the Heroku CLI to push the code.
-5. **Start the Worker Dyno:**
-   Go to the "Resources" tab and toggle the `worker` dyno to ON.
+**1. Install Docker & Docker Compose on your VPS:**
+```bash
+sudo apt update
+sudo apt install docker.io docker-compose -y
+```
 
-## Note on Memory Limits
-This bot uses `openai-whisper` and `ffmpeg`. The `base` whisper model uses around ~500MB of RAM. If you are using Heroku's Eco or Basic dynos (512MB RAM), the bot might occasionally crash due to memory constraints when processing larger videos. It is recommended to test with short clips first.
+**2. Clone the repository and navigate to it:**
+```bash
+git clone <your-repo-url>
+cd <repo-folder>
+```
+
+**3. Configure your Bot:**
+- Open `config.py` and ensure your `BOT_TOKEN` is set, or define it in the `docker-compose.yml` file under the `environment:` section.
+
+**4. Start the Bot:**
+Run the following command to build the image and start the bot in the background:
+```bash
+sudo docker-compose up --build -d
+```
+
+To view the live logs of the bot:
+```bash
+sudo docker logs -f tg-video-bot
+```
+
+## Legacy Heroku Deployment
+
+While you can deploy this on Heroku by adding the `heroku/python` and `https://github.com/jonathanong/heroku-buildpack-ffmpeg-latest.git` buildpacks, the RAM limits on free/eco tiers (512MB) will frequently crash `openai-whisper` during large video transcriptions. Docker on a VPS is the superior method.
