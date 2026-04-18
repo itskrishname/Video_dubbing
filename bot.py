@@ -35,7 +35,7 @@ SESSIONS = {}
 # Blocking sync functions to run in executor
 def run_ffmpeg(stream):
     # Pass threads=0 globally to allow FFMPEG to use all available VPS CPU cores
-    stream = ffmpeg.global_args(stream, '-threads', '0')
+    stream = stream.global_args('-threads', '0')
     ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
 
 def transcribe_audio(audio_path):
