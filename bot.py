@@ -34,8 +34,7 @@ SESSIONS = {}
 
 # Blocking sync functions to run in executor
 def run_ffmpeg(stream):
-    # Pass threads=0 globally to allow FFMPEG to use all available VPS CPU cores
-    ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True, global_args=['-threads', '0'])
+    ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
 
 def transcribe_audio(audio_path):
     import torch
@@ -358,7 +357,7 @@ async def process_video(client: Client, video_msg: Message, status_msg: Message,
         # 2. Extract Audio
         await update_status(status_msg, "ᴇxᴛʀᴀᴄᴛɪɴɢ ᴀᴜᴅɪᴏ...")
         try:
-            stream = ffmpeg.input(SESSIONS[user_id]["orig_video_path"]).output(SESSIONS[user_id]["audio_path"], acodec='pcm_s16le', ac=1, ar='16k')
+            stream = ffmpeg.input(SESSIONS[user_id]["orig_video_path"]).output(SESSIONS[user_id]["audio_path"], acodec='pcm_s16le', ac=1, ar='16k', threads=0)
             await asyncio.to_thread(run_ffmpeg, stream)
         except ffmpeg.Error as e:
             print(e.stderr.decode())
@@ -476,7 +475,7 @@ async def finalize_video(client: Client, user_id: int):
                 video_stream = in_file.video.filter('subtitles', escaped_srt_path, fontsdir=fonts_dir, force_style=style)
                 audio_stream = in_file.audio
 
-                stream = ffmpeg.output(video_stream, audio_stream, final_video_path, vcodec='libx264', acodec='copy')
+                stream = ffmpeg.output(video_stream, audio_stream, final_video_path, vcodec='libx264', acodec='copy', threads=0)
                 await asyncio.to_thread(run_ffmpeg, stream)
             except ffmpeg.Error as e:
                 print(f"subtitles error: {e.stderr.decode()}")
@@ -518,7 +517,7 @@ async def finalize_video(client: Client, user_id: int):
                     for f in tempo_filters:
                         stream = stream.filter('atempo', f)
 
-                    stream = ffmpeg.output(stream, synced_audio_path, ar=44100)
+                    stream = ffmpeg.output(stream, synced_audio_path, ar=44100, threads=0)
                     await asyncio.to_thread(run_ffmpeg, stream)
                 except ffmpeg.Error as e:
                     print(f"atempo error: {e.stderr.decode()}")
@@ -532,7 +531,7 @@ async def finalize_video(client: Client, user_id: int):
             audio_input = ffmpeg.input(synced_audio_path)
 
             try:
-                stream = ffmpeg.output(video_input.video, audio_input.audio, final_video_path, vcodec='copy', acodec='aac', strict='experimental')
+                stream = ffmpeg.output(video_input.video, audio_input.audio, final_video_path, vcodec='copy', acodec='aac', strict='experimental', threads=0)
                 await asyncio.to_thread(run_ffmpeg, stream)
             except ffmpeg.Error as e:
                 print(f"merge error: {e.stderr.decode()}")
