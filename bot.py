@@ -5,7 +5,6 @@ import time
 import ffmpeg
 import whisper
 import edge_tts
-import google.generativeai as genai
 from deep_translator import GoogleTranslator
 from indic_transliteration import sanscript
 from pyrogram import Client, filters
@@ -29,10 +28,6 @@ print("Loading Whisper Model...")
 model = whisper.load_model("small")
 print("Whisper Model Loaded.")
 
-# Configure Gemini API
-genai.configure(api_key=Config.GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel('gemini-pro')
-
 # Store ongoing sessions for the review flow
 SESSIONS = {}
 
@@ -50,42 +45,7 @@ async def translate_text(text, target_lang):
     if target_lang == "en" or not text.strip():
         return text
 
-    if target_lang == "hinglishgemini":
-        # Use Google Gemini API for highly accurate, natural conversational Hinglish
-        try:
-            prompt = (
-                "You are an expert localizer. Your job is to translate the given English text into casual 'Hinglish' "
-                "(Hindi written ONLY in the English alphabet, exactly like a WhatsApp chat).\n\n"
-                "CRITICAL RULES:\n"
-                "1. NEVER output pure English. It must be Hindi grammar/structure.\n"
-                "2. NEVER output Devanagari script (e.g., नमस्ते is WRONG. Namaste is CORRECT).\n"
-                "3. Keep common English nouns/verbs if they are used in daily life (e.g., use 'time' instead of 'samay', 'phone', 'wait').\n"
-                "4. Output ONLY the translation. No quotes, no explanations.\n\n"
-                "EXAMPLES:\n"
-                "English: I want to eat an apple.\n"
-                "Hinglish: Mujhe ek apple khana hai.\n\n"
-                "English: What time are we going to the store?\n"
-                "Hinglish: Hum log store kis time ja rahe hain?\n\n"
-                "English: I will check my phone and call you later.\n"
-                "Hinglish: Main apna phone check karke tumhe baad mein call karta hu.\n\n"
-                f"Now, translate this English text into Hinglish:\n{text}"
-            )
-
-            # Async call to Gemini API
-            response = await asyncio.to_thread(gemini_model.generate_content, prompt)
-
-            translated = response.text.strip()
-            if translated:
-                return translated
-
-            raise ValueError("Gemini returned empty string.")
-
-        except Exception as e:
-            print(f"Gemini Hinglish Error: {e}")
-            # If Gemini fails (e.g. rate limit), automatically fallback to formal Hinglish
-            target_lang = "hinglishgoogle"
-
-    if target_lang == "hinglishgoogle":
+    if target_lang == "hinglish":
         # Standard Transliteration fallback: 100% reliable but sounds like formal "Shuddh" Hindi
         try:
             hindi_text = await asyncio.to_thread(GoogleTranslator(source='auto', target='hi').translate, text)
@@ -347,8 +307,7 @@ async def main_menu_callback(client: Client, callback_query: CallbackQuery):
             InlineKeyboardButton("🇺🇸 English", callback_data=f"langbtn_en")
         ],
         [
-            InlineKeyboardButton("🤖 AI Hinglish (Best)", callback_data=f"langbtn_hinglishgemini"),
-            InlineKeyboardButton("🌐 Google Hinglish", callback_data=f"langbtn_hinglishgoogle")
+            InlineKeyboardButton("🇮🇳🇺🇸 Hinglish", callback_data=f"langbtn_hinglish")
         ]
     ])
 
@@ -628,7 +587,7 @@ async def finalize_video(client: Client, user_id: int):
             await update_status(status_msg, "ɢᴇɴᴇʀᴀᴛɪɴɢ ᴀɪ ᴠᴏɪᴄᴇ...")
             translated_text = session["final_dub_text"]
 
-            voice_id = "hi-IN-MadhurNeural" if lang_code in ["hi", "hinglishgemini", "hinglishgoogle"] else "en-US-ChristopherNeural"
+            voice_id = "hi-IN-MadhurNeural" if lang_code in ["hi", "hinglish"] else "en-US-ChristopherNeural"
 
             communicate = edge_tts.Communicate(translated_text, voice_id)
             await communicate.save(tts_audio_path)

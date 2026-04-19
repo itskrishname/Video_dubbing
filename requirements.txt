@@ -6,4 +6,3 @@ git+https://github.com/openai/whisper.git
 deep-translator==1.11.4
 edge-tts
 indic-transliteration==2.3.82
-google-generativeai
