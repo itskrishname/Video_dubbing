@@ -43,7 +43,7 @@ def transcribe_audio(audio_path):
     return model.transcribe(audio_path, language="en", fp16=fp16)
 
 async def translate_text(text, target_lang):
-    if target_lang == "en":
+    if target_lang == "en" or not text.strip():
         return text
 
     if target_lang == "hinglish":
@@ -72,34 +72,48 @@ async def translate_text(text, target_lang):
                 provider=g4f.Provider.PollinationsAI,
                 messages=[{'role': 'user', 'content': prompt}]
             )
-            return response.strip()
+
+            translated = response.strip()
+            if translated:
+                return translated
+            # If AI returned blank (silent failure), intentionally drop to exception fallback
+            raise ValueError("AI returned empty string.")
+
         except Exception as e:
             print(f"Hinglish AI Translation Error: {e}")
             # Fallback to transliterated formal Hindi if AI fails
             hindi_text = await asyncio.to_thread(GoogleTranslator(source='auto', target='hi').translate, text)
+            if not hindi_text:
+                return text
             hinglish_text = sanscript.transliterate(hindi_text, sanscript.DEVANAGARI, sanscript.ITRANS)
             return hinglish_text.capitalize()
 
     # Translate to Hindi Devanagari
-    return await asyncio.to_thread(GoogleTranslator(source='auto', target='hi').translate, text)
+    try:
+        translated = await asyncio.to_thread(GoogleTranslator(source='auto', target='hi').translate, text)
+        return translated if translated else text
+    except Exception as e:
+        print(f"Google Translate Error: {e}")
+        return text
 
 async def translate_segments_to_srt_string(segments, target_lang):
     srt_content = ""
+    # Concurrency limit to prevent free API rate limits / dropped subtitles
+    semaphore = asyncio.Semaphore(5)
 
     async def process_segment(i, segment):
         start = format_timestamp(segment["start"])
         end = format_timestamp(segment["end"])
         text = segment["text"].strip()
 
-        if target_lang != "en":
-            text = await translate_text(text, target_lang)
+        async with semaphore:
+            if target_lang != "en" and text:
+                text = await translate_text(text, target_lang)
 
         return f"{i}\n{start} --> {end}\n{text}\n\n"
 
     # Process all segments concurrently
     tasks = [process_segment(i, seg) for i, seg in enumerate(segments, start=1)]
-    # Use gather with a semaphore or directly to massively speed up translations
-    # Pollinations/GoogleTranslate are fairly robust, so direct gather is often fine for normal length clips
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for r in results:
@@ -185,6 +199,15 @@ def get_duration(filename):
         print(f"ffprobe error: {e.stderr.decode()}")
         return 0
 
+def get_subtitle_streams(filename):
+    try:
+        probe = ffmpeg.probe(filename)
+        subtitle_streams = [stream for stream in probe['streams'] if stream['codec_type'] == 'subtitle']
+        return subtitle_streams
+    except ffmpeg.Error as e:
+        print(f"ffprobe error: {e.stderr.decode()}")
+        return []
+
 async def update_status(message: Message, text: str):
     try:
         await message.edit_text(f"✦ {text} ✦")
@@ -244,60 +267,108 @@ async def handle_video(client: Client, message: Message):
         await message.reply_text("⛔ You are not authorized to use this bot.")
         return
 
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎙️ Dub Video", callback_data="menu_dub"),
-            InlineKeyboardButton("📝 Subtitle Video", callback_data="menu_sub")
-        ]
-    ])
+    # Acknowledge and download briefly to probe for subtitles
+    status_msg = await message.reply_text("✦ ᴄʜᴇᴄᴋɪɴɢ ᴠɪᴅᴇᴏ ɪɴꜰᴏ... ✦", quote=True)
 
-    await message.reply_text(
-        "🎥 Video received! What would you like to do?",
-        reply_markup=keyboard,
-        quote=True
+    user_id = message.from_user.id
+    timestamp = int(time.time())
+    orig_video_path = f"/tmp/input_{timestamp}.mp4"
+
+    # Store initial session path
+    SESSIONS[user_id] = {
+        "timestamp": timestamp,
+        "video_msg": message,
+        "status_msg": status_msg,
+        "orig_video_path": orig_video_path
+    }
+
+    start_time = time.time()
+    await message.download(
+        file_name=orig_video_path,
+        progress=progress_callback,
+        progress_args=(status_msg, start_time, "ᴅᴏᴡɴʟᴏᴀᴅɪɴɢ ᴠɪᴅᴇᴏ ꜰᴏʀ ᴀɴᴀʟʏsɪs")
     )
 
-@app.on_callback_query(filters.regex("^menu_"))
+    await update_status(status_msg, "ᴀɴᴀʟʏᴢɪɴɢ ᴠɪᴅᴇᴏ...")
+    subs = await asyncio.to_thread(get_subtitle_streams, orig_video_path)
+
+    keyboard_buttons = []
+
+    if subs:
+        for i, sub in enumerate(subs):
+            lang = sub.get('tags', {}).get('language', f'Track {i}')
+            keyboard_buttons.append([InlineKeyboardButton(f"📝 Extract Subtitles ({lang.upper()})", callback_data=f"extract_{i}")])
+
+    keyboard_buttons.append([InlineKeyboardButton("🎙️ AI Dub Video", callback_data="menu_dub")])
+    keyboard_buttons.append([InlineKeyboardButton("📝 AI Subtitle Video", callback_data="menu_sub")])
+
+    keyboard = InlineKeyboardMarkup(keyboard_buttons)
+
+    await status_msg.edit_text(
+        "🎥 Video received & analyzed!\n\nWould you like to extract existing subtitles or use AI Whisper to generate new ones?",
+        reply_markup=keyboard
+    )
+
+@app.on_callback_query(filters.regex("^(menu|extract)_"))
 async def main_menu_callback(client: Client, callback_query: CallbackQuery):
     if callback_query.from_user.id != Config.OWNER_ID:
         await callback_query.answer("⛔ Unauthorized.", show_alert=True)
         return
 
-    action = callback_query.data.split("_")[1] # 'dub' or 'sub'
+    data = callback_query.data
+    user_id = callback_query.from_user.id
+
+    if data.startswith("extract_"):
+        track_id = data.split("_")[1]
+        SESSIONS[user_id]["extract_track"] = track_id
+        action = "sub"
+    else:
+        action = data.split("_")[1] # 'dub' or 'sub'
+        if "extract_track" in SESSIONS.get(user_id, {}):
+            del SESSIONS[user_id]["extract_track"]
+
+    # Save intent
+    if user_id in SESSIONS:
+        SESSIONS[user_id]["action"] = action
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🇮🇳 Hindi", callback_data=f"{action}_hi"),
-            InlineKeyboardButton("🇺🇸 English", callback_data=f"{action}_en")
+            InlineKeyboardButton("🇮🇳 Hindi", callback_data=f"langbtn_hi"),
+            InlineKeyboardButton("🇺🇸 English", callback_data=f"langbtn_en")
         ],
         [
-            InlineKeyboardButton("🇮🇳🇺🇸 Hinglish", callback_data=f"{action}_hinglish")
+            InlineKeyboardButton("🇮🇳🇺🇸 Hinglish", callback_data=f"langbtn_hinglish")
         ]
     ])
 
     action_text = "Dubbing" if action == "dub" else "Subtitles"
+    if "extract_track" in SESSIONS.get(user_id, {}):
+        action_text = "Extracted Subtitles Translation"
 
     await callback_query.message.edit_text(
         f"Select the language for **{action_text}**:",
         reply_markup=keyboard
     )
 
-@app.on_callback_query(filters.regex("^(dub|sub)_"))
+@app.on_callback_query(filters.regex("^langbtn_"))
 async def process_video_callback(client: Client, callback_query: CallbackQuery):
     if callback_query.from_user.id != Config.OWNER_ID:
         await callback_query.answer("⛔ Unauthorized.", show_alert=True)
         return
 
-    action, lang_code = callback_query.data.split("_")
+    lang_code = callback_query.data.split("_")[1]
+    user_id = callback_query.from_user.id
+
+    if user_id not in SESSIONS:
+        await callback_query.answer("❌ Session expired.", show_alert=True)
+        return
+
+    SESSIONS[user_id]["lang_code"] = lang_code
+    action = SESSIONS[user_id]["action"]
 
     await callback_query.answer()
     status_msg = callback_query.message
-    await update_status(status_msg, "ᴅᴏᴡɴʟᴏᴀᴅɪɴɢ ᴠɪᴅᴇᴏ...")
-
-    video_msg = status_msg.reply_to_message
-    if not video_msg or not video_msg.video:
-        await update_status(status_msg, "❌ Error: Could not find the original video.")
-        return
+    video_msg = SESSIONS[user_id]["video_msg"]
 
     # Run the processing pipeline
     asyncio.create_task(process_video(client, video_msg, status_msg, action, lang_code))
@@ -354,29 +425,87 @@ async def process_video(client: Client, video_msg: Message, status_msg: Message,
             progress_args=(status_msg, start_time, "ᴅᴏᴡɴʟᴏᴀᴅɪɴɢ ᴠɪᴅᴇᴏ")
         )
 
-        # 2. Extract Audio
-        await update_status(status_msg, "ᴇxᴛʀᴀᴄᴛɪɴɢ ᴀᴜᴅɪᴏ...")
-        try:
-            stream = ffmpeg.input(SESSIONS[user_id]["orig_video_path"]).output(SESSIONS[user_id]["audio_path"], acodec='pcm_s16le', ac=1, ar='16k', threads=0)
-            await asyncio.to_thread(run_ffmpeg, stream)
-        except ffmpeg.Error as e:
-            print(e.stderr.decode())
-            await update_status(status_msg, "❌ Error extracting audio.")
-            cleanup_session(user_id)
-            return
+        extract_track = SESSIONS[user_id].get("extract_track")
 
-        # 3. Transcribe with Whisper
-        await update_status(status_msg, "ᴛʀᴀɴsᴄʀɪʙɪɴɢ ᴀᴜᴅɪᴏ...")
-        result = await asyncio.to_thread(transcribe_audio, SESSIONS[user_id]["audio_path"])
-        transcribed_text = result["text"].strip()
+        if extract_track:
+            # --- Extract Subtitles via FFMPEG ---
+            await update_status(status_msg, "ᴇxᴛʀᴀᴄᴛɪɴɢ sᴜʙᴛɪᴛʟᴇs ꜰʀᴏᴍ ᴠɪᴅᴇᴏ...")
+            SESSIONS[user_id]["srt_path"] = f"/tmp/extracted_{timestamp}.srt"
 
-        if not transcribed_text:
-            await update_status(status_msg, "❌ Could not detect any speech in the video.")
-            cleanup_session(user_id)
-            return
+            try:
+                stream = ffmpeg.input(SESSIONS[user_id]["orig_video_path"]).output(SESSIONS[user_id]["srt_path"], map=f"0:s:{extract_track}", threads=0)
+                await asyncio.to_thread(run_ffmpeg, stream)
+            except ffmpeg.Error as e:
+                print(e.stderr.decode())
+                await update_status(status_msg, "❌ Error extracting subtitle track.")
+                cleanup_session(user_id)
+                return
 
-        SESSIONS[user_id]["transcription_result"] = result
-        SESSIONS[user_id]["transcribed_text"] = transcribed_text
+            # Parse SRT into whisper-like segments format so our translation logic works seamlessly
+            await update_status(status_msg, "ᴘᴀʀsɪɴɢ ᴇxᴛʀᴀᴄᴛᴇᴅ sᴜʙᴛɪᴛʟᴇs...")
+            segments = []
+            full_text = ""
+            if os.path.exists(SESSIONS[user_id]["srt_path"]):
+                with open(SESSIONS[user_id]["srt_path"], "r", encoding="utf-8") as f:
+                    content = f.read()
+                    import re
+                    blocks = re.split(r'\n\s*\n', content)
+                    for block in blocks:
+                        lines = block.split('\n')
+                        if len(lines) >= 3:
+                            time_line = lines[1]
+                            text_lines = " ".join(lines[2:])
+
+                            # Parse SRT timestamp to seconds for whisper format compatibility
+                            # 00:00:01,000 --> 00:00:04,000
+                            try:
+                                start_str, end_str = time_line.split(" --> ")
+                                def parse_ts(ts):
+                                    h, m, s_ms = ts.split(":")
+                                    s, ms = s_ms.split(",")
+                                    return int(h)*3600 + int(m)*60 + int(s) + int(ms)/1000.0
+
+                                segments.append({
+                                    "start": parse_ts(start_str),
+                                    "end": parse_ts(end_str),
+                                    "text": text_lines
+                                })
+                                full_text += text_lines + " "
+                            except Exception as e:
+                                pass
+
+            if not segments:
+                await update_status(status_msg, "❌ Could not extract any text from the subtitle track.")
+                cleanup_session(user_id)
+                return
+
+            SESSIONS[user_id]["transcription_result"] = {"segments": segments, "text": full_text.strip()}
+            SESSIONS[user_id]["transcribed_text"] = full_text.strip()
+        else:
+            # --- Extract Audio and Transcribe via Whisper ---
+            # 2. Extract Audio
+            await update_status(status_msg, "ᴇxᴛʀᴀᴄᴛɪɴɢ ᴀᴜᴅɪᴏ...")
+            try:
+                stream = ffmpeg.input(SESSIONS[user_id]["orig_video_path"]).output(SESSIONS[user_id]["audio_path"], acodec='pcm_s16le', ac=1, ar='16k', threads=0)
+                await asyncio.to_thread(run_ffmpeg, stream)
+            except ffmpeg.Error as e:
+                print(e.stderr.decode())
+                await update_status(status_msg, "❌ Error extracting audio.")
+                cleanup_session(user_id)
+                return
+
+            # 3. Transcribe with Whisper
+            await update_status(status_msg, "ᴛʀᴀɴsᴄʀɪʙɪɴɢ ᴀᴜᴅɪᴏ...")
+            result = await asyncio.to_thread(transcribe_audio, SESSIONS[user_id]["audio_path"])
+            transcribed_text = result["text"].strip()
+
+            if not transcribed_text:
+                await update_status(status_msg, "❌ Could not detect any speech in the video.")
+                cleanup_session(user_id)
+                return
+
+            SESSIONS[user_id]["transcription_result"] = result
+            SESSIONS[user_id]["transcribed_text"] = transcribed_text
 
         # 4. Generate Initial Translation for Review
         await generate_and_send_review(client, user_id)
