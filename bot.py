@@ -5,7 +5,7 @@ import time
 import ffmpeg
 import whisper
 import edge_tts
-import g4f
+import google.generativeai as genai
 from deep_translator import GoogleTranslator
 from indic_transliteration import sanscript
 from pyrogram import Client, filters
@@ -29,6 +29,10 @@ print("Loading Whisper Model...")
 model = whisper.load_model("small")
 print("Whisper Model Loaded.")
 
+# Configure Gemini API
+genai.configure(api_key=Config.GEMINI_API_KEY)
+gemini_model = genai.GenerativeModel('gemini-pro')
+
 # Store ongoing sessions for the review flow
 SESSIONS = {}
 
@@ -46,8 +50,8 @@ async def translate_text(text, target_lang):
     if target_lang == "en" or not text.strip():
         return text
 
-    if target_lang == "hinglish":
-        # Use AI model for natural, conversational Hinglish instead of formal translation
+    if target_lang == "hinglishgemini":
+        # Use Google Gemini API for highly accurate, natural conversational Hinglish
         try:
             prompt = (
                 "You are an expert localizer. Your job is to translate the given English text into casual 'Hinglish' "
@@ -66,27 +70,32 @@ async def translate_text(text, target_lang):
                 "Hinglish: Main apna phone check karke tumhe baad mein call karta hu.\n\n"
                 f"Now, translate this English text into Hinglish:\n{text}"
             )
-            # Async call to the provider to avoid blocking
-            response = await g4f.ChatCompletion.create_async(
-                model='openai',
-                provider=g4f.Provider.PollinationsAI,
-                messages=[{'role': 'user', 'content': prompt}]
-            )
 
-            translated = response.strip()
+            # Async call to Gemini API
+            response = await asyncio.to_thread(gemini_model.generate_content, prompt)
+
+            translated = response.text.strip()
             if translated:
                 return translated
-            # If AI returned blank (silent failure), intentionally drop to exception fallback
-            raise ValueError("AI returned empty string.")
+
+            raise ValueError("Gemini returned empty string.")
 
         except Exception as e:
-            print(f"Hinglish AI Translation Error: {e}")
-            # Fallback to transliterated formal Hindi if AI fails
+            print(f"Gemini Hinglish Error: {e}")
+            # If Gemini fails (e.g. rate limit), automatically fallback to formal Hinglish
+            target_lang = "hinglishgoogle"
+
+    if target_lang == "hinglishgoogle":
+        # Standard Transliteration fallback: 100% reliable but sounds like formal "Shuddh" Hindi
+        try:
             hindi_text = await asyncio.to_thread(GoogleTranslator(source='auto', target='hi').translate, text)
             if not hindi_text:
                 return text
             hinglish_text = sanscript.transliterate(hindi_text, sanscript.DEVANAGARI, sanscript.ITRANS)
             return hinglish_text.capitalize()
+        except Exception as e:
+            print(f"Hinglish Transliteration Error: {e}")
+            return text
 
     # Translate to Hindi Devanagari
     try:
@@ -255,8 +264,9 @@ async def update_command(client: Client, message: Message):
 
         await status_msg.edit_text(response_text + "\n\n♻️ **Restarting bot to apply changes...**")
 
-        # Restart the process
-        os.execv(sys.executable, ['python3'] + sys.argv)
+        # Stop Pyrogram and exit so Docker/Systemd restarts it
+        await client.stop()
+        sys.exit(0)
 
     except Exception as e:
         await status_msg.edit_text(f"❌ Failed to update: {str(e)}")
@@ -337,7 +347,8 @@ async def main_menu_callback(client: Client, callback_query: CallbackQuery):
             InlineKeyboardButton("🇺🇸 English", callback_data=f"langbtn_en")
         ],
         [
-            InlineKeyboardButton("🇮🇳🇺🇸 Hinglish", callback_data=f"langbtn_hinglish")
+            InlineKeyboardButton("🤖 AI Hinglish (Best)", callback_data=f"langbtn_hinglishgemini"),
+            InlineKeyboardButton("🌐 Google Hinglish", callback_data=f"langbtn_hinglishgoogle")
         ]
     ])
 
@@ -617,7 +628,7 @@ async def finalize_video(client: Client, user_id: int):
             await update_status(status_msg, "ɢᴇɴᴇʀᴀᴛɪɴɢ ᴀɪ ᴠᴏɪᴄᴇ...")
             translated_text = session["final_dub_text"]
 
-            voice_id = "hi-IN-MadhurNeural" if lang_code in ["hi", "hinglish"] else "en-US-ChristopherNeural"
+            voice_id = "hi-IN-MadhurNeural" if lang_code in ["hi", "hinglishgemini", "hinglishgoogle"] else "en-US-ChristopherNeural"
 
             communicate = edge_tts.Communicate(translated_text, voice_id)
             await communicate.save(tts_audio_path)
