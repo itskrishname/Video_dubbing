@@ -5,10 +5,10 @@ import time
 import ffmpeg
 import whisper
 import edge_tts
-import PyPDF2
 from pdf2image import convert_from_path
 import pytesseract
-from fpdf import FPDF
+from PIL import Image, ImageDraw, ImageFont
+import textwrap
 from deep_translator import GoogleTranslator
 from indic_transliteration import sanscript
 from pyrogram import Client, filters
@@ -338,58 +338,101 @@ async def process_pdf_callback(client: Client, callback_query: CallbackQuery):
             progress_args=(status_msg, start_time, "ᴅᴏᴡɴʟᴏᴀᴅɪɴɢ ᴘᴅꜰ")
         )
 
-        await update_status(status_msg, "ᴇxᴛʀᴀᴄᴛɪɴɢ & ᴛʀᴀɴsʟᴀᴛɪɴɢ ᴛᴇxᴛ...")
+        await update_status(status_msg, "ᴘʀᴏᴄᴇssɪɴɢ ᴘᴅꜰ ᴠɪsᴜᴀʟʟʏ (ᴏᴄʀ)... ᴛʜɪs ᴡɪʟʟ ᴛᴀᴋᴇ ᴛɪᴍᴇ ⏳")
 
-        # Read PDF Text
-        extracted_text = ""
-        with open(orig_pdf_path, "rb") as f:
-            reader = PyPDF2.PdfReader(f)
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    extracted_text += page_text + "\n\n"
-
-        if not extracted_text.strip():
-            await update_status(status_msg, "🔍 ɴᴏ ᴛᴇxᴛ ꜰᴏᴜɴᴅ. ʀᴜɴɴɪɴɢ ᴏᴄʀ (ᴛʜɪs ᴍɪɢʜᴛ ᴛᴀᴋᴇ ᴀ ᴡʜɪʟᴇ)...")
-            # PDF might be an image or scanned document. Run OCR.
-            def extract_ocr():
-                ocr_text = ""
-                images = convert_from_path(orig_pdf_path)
-                for img in images:
-                    ocr_text += pytesseract.image_to_string(img) + "\n\n"
-                return ocr_text
-
-            extracted_text = await asyncio.to_thread(extract_ocr)
-
-        if not extracted_text.strip():
-            await update_status(status_msg, "❌ Error: Could not extract any text or images from the PDF.")
-            return
-
-        # Split into chunks to respect translation API limits (approx 4500 chars)
-        import textwrap
-        chunks = textwrap.wrap(extracted_text, width=4000, break_long_words=False, replace_whitespace=False)
-
-        translated_text = ""
-        # We process chunks serially for PDF to avoid blowing up free APIs with massive documents
-        for chunk in chunks:
-            translated_chunk = await translate_text(chunk, lang_code)
-            translated_text += translated_chunk + "\n"
-
-        await update_status(status_msg, "ɢᴇɴᴇʀᴀᴛɪɴɢ ɴᴇᴡ ᴘᴅꜰ ꜰɪʟᴇ...")
-
-        # Generate new PDF with FPDF
-        def create_pdf():
-            pdf = FPDF()
-            pdf.add_page()
+        async def process_visual_pdf():
+            images = convert_from_path(orig_pdf_path)
             font_path = os.path.abspath("fonts/Mukta.ttf")
-            pdf.add_font("Mukta", "", font_path)
-            pdf.set_font("Mukta", size=12)
+            try:
+                font = ImageFont.truetype(font_path, 20)
+            except:
+                font = ImageFont.load_default()
 
-            # FPDF requires string encoding handling for multi_cell
-            pdf.multi_cell(0, 8, translated_text)
-            pdf.output(new_pdf_path)
+            processed_images = []
 
-        await asyncio.to_thread(create_pdf)
+            for img in images:
+                draw = ImageDraw.Draw(img)
+                # Use pytesseract to get data dict
+                data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+
+                # Group words into blocks to maintain context for translation
+                blocks = {}
+                for i in range(len(data['text'])):
+                    if int(data['conf'][i]) > 30 and data['text'][i].strip() != '':
+                        block_num = data['block_num'][i]
+                        if block_num not in blocks:
+                            blocks[block_num] = {
+                                'text': [],
+                                'x': data['left'][i],
+                                'y': data['top'][i],
+                                'w': 0,
+                                'h': 0,
+                                'max_right': 0,
+                                'max_bottom': 0
+                            }
+
+                        b = blocks[block_num]
+                        b['text'].append(data['text'][i])
+                        b['x'] = min(b['x'], data['left'][i])
+                        b['y'] = min(b['y'], data['top'][i])
+                        b['max_right'] = max(b['max_right'], data['left'][i] + data['width'][i])
+                        b['max_bottom'] = max(b['max_bottom'], data['top'][i] + data['height'][i])
+
+                # Translate and draw blocks
+                for b_id, b in blocks.items():
+                    original_text = " ".join(b['text'])
+                    if not original_text.strip():
+                        continue
+
+                    b['w'] = b['max_right'] - b['x']
+                    b['h'] = b['max_bottom'] - b['y']
+
+                    # Draw white rectangle over the original text
+                    draw.rectangle([b['x'], b['y'], b['max_right'], b['max_bottom']], fill="white")
+
+                # We need to gather translations concurrently so it doesn't take hours
+                # Extract all text blocks
+                block_list = list(blocks.values())
+
+                # Fetch translations using semaphore
+                sem = asyncio.Semaphore(5)
+                async def fetch_trans(text):
+                    async with sem:
+                        return await translate_text(text, lang_code)
+
+                tasks = [fetch_trans(" ".join(b['text'])) for b in block_list]
+                translated_texts = await asyncio.gather(*tasks, return_exceptions=True)
+
+                for idx, b in enumerate(block_list):
+                    t_text = translated_texts[idx]
+                    if isinstance(t_text, Exception):
+                        t_text = " ".join(b['text'])
+
+                    # Wrap text to fit the bounding box
+                    # Approximate chars per line based on box width and font size (avg 10px per char)
+                    chars_per_line = max(10, int(b['w'] / 10))
+                    wrapped_text = textwrap.fill(t_text, width=chars_per_line)
+
+                    draw.text((b['x'], b['y']), wrapped_text, fill="black", font=font)
+
+                processed_images.append(img)
+
+            if processed_images:
+                processed_images[0].save(
+                    new_pdf_path, "PDF" ,resolution=100.0, save_all=True, append_images=processed_images[1:]
+                )
+            else:
+                raise Exception("Failed to process any images from PDF.")
+
+
+        def run_visual_sync():
+            # Create a new event loop for the background thread to handle async gathers
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(process_visual_pdf())
+            loop.close()
+
+        await asyncio.to_thread(run_visual_sync)
 
         await update_status(status_msg, "ᴜᴘʟᴏᴀᴅɪɴɢ ᴛʀᴀɴsʟᴀᴛᴇᴅ ᴘᴅꜰ...")
         start_time = time.time()
