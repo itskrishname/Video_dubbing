@@ -366,7 +366,7 @@ async def process_pdf_callback(client: Client, callback_query: CallbackQuery):
             pdf = FPDF()
             pdf.add_page()
             font_path = os.path.abspath("fonts/Mukta.ttf")
-            pdf.add_font("Mukta", "", font_path, uni=True)
+            pdf.add_font("Mukta", "", font_path)
             pdf.set_font("Mukta", size=12)
 
             # FPDF requires string encoding handling for multi_cell
