@@ -228,9 +228,9 @@ async def update_command(client: Client, message: Message):
 
         await status_msg.edit_text(response_text + "\n\n♻️ **Restarting bot to apply changes...**")
 
-        # Stop Pyrogram and exit so Docker/Systemd restarts it
-        await client.stop()
-        sys.exit(0)
+        # Force exit to avoid Pyrogram "Task cannot await on itself" deadlock.
+        # Docker/systemd will instantly restart the process.
+        os._exit(0)
 
     except Exception as e:
         await status_msg.edit_text(f"❌ Failed to update: {str(e)}")

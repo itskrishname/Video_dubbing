@@ -2,7 +2,7 @@ import os
 
 class Config:
     # Telegram Bot Token from BotFather
-    BOT_TOKEN = os.environ.get("BOT_TOKEN", "8432154170:AAEcYvbTaEeH9ZdctxXtc0ZEPHeH-COHNb0")
+    BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
     # Your Telegram User ID
     OWNER_ID = 7660990923
