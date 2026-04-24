@@ -6,3 +6,5 @@ git+https://github.com/openai/whisper.git
 deep-translator==1.11.4
 edge-tts
 indic-transliteration==2.3.82
+PyPDF2==3.0.1
+fpdf2==2.7.9

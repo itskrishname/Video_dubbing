@@ -5,6 +5,8 @@ import time
 import ffmpeg
 import whisper
 import edge_tts
+import PyPDF2
+from fpdf import FPDF
 from deep_translator import GoogleTranslator
 from indic_transliteration import sanscript
 from pyrogram import Client, filters
@@ -231,6 +233,31 @@ async def update_command(client: Client, message: Message):
     except Exception as e:
         await status_msg.edit_text(f"❌ Failed to update: {str(e)}")
 
+@app.on_message(filters.document & filters.private)
+async def handle_document(client: Client, message: Message):
+    if message.from_user.id != Config.OWNER_ID:
+        await message.reply_text("⛔ You are not authorized to use this bot.")
+        return
+
+    if message.document.mime_type != "application/pdf":
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🇮🇳 Hindi", callback_data="pdflang_hi"),
+            InlineKeyboardButton("🇺🇸 English", callback_data="pdflang_en")
+        ],
+        [
+            InlineKeyboardButton("🇮🇳🇺🇸 Hinglish", callback_data="pdflang_hinglish")
+        ]
+    ])
+
+    await message.reply_text(
+        "📄 PDF received! Which language would you like to translate this document into?",
+        reply_markup=keyboard,
+        quote=True
+    )
+
 @app.on_message(filters.video & filters.private)
 async def handle_video(client: Client, message: Message):
     if message.from_user.id != Config.OWNER_ID:
@@ -278,6 +305,97 @@ async def handle_video(client: Client, message: Message):
         "🎥 Video received & analyzed!\n\nWould you like to extract existing subtitles or use AI Whisper to generate new ones?",
         reply_markup=keyboard
     )
+
+@app.on_callback_query(filters.regex("^pdflang_"))
+async def process_pdf_callback(client: Client, callback_query: CallbackQuery):
+    if callback_query.from_user.id != Config.OWNER_ID:
+        await callback_query.answer("⛔ Unauthorized.", show_alert=True)
+        return
+
+    lang_code = callback_query.data.split("_")[1]
+
+    await callback_query.answer()
+    status_msg = callback_query.message
+    doc_msg = status_msg.reply_to_message
+
+    if not doc_msg or not doc_msg.document:
+        await update_status(status_msg, "❌ Error: Could not find the original PDF.")
+        return
+
+    await update_status(status_msg, "ᴅᴏᴡɴʟᴏᴀᴅɪɴɢ ᴘᴅꜰ...")
+
+    timestamp = int(time.time())
+    orig_pdf_path = f"/tmp/input_{timestamp}.pdf"
+    new_pdf_path = f"/tmp/translated_{timestamp}.pdf"
+
+    try:
+        start_time = time.time()
+        await doc_msg.download(
+            file_name=orig_pdf_path,
+            progress=progress_callback,
+            progress_args=(status_msg, start_time, "ᴅᴏᴡɴʟᴏᴀᴅɪɴɢ ᴘᴅꜰ")
+        )
+
+        await update_status(status_msg, "ᴇxᴛʀᴀᴄᴛɪɴɢ & ᴛʀᴀɴsʟᴀᴛɪɴɢ ᴛᴇxᴛ...")
+
+        # Read PDF Text
+        extracted_text = ""
+        with open(orig_pdf_path, "rb") as f:
+            reader = PyPDF2.PdfReader(f)
+            for page in reader.pages:
+                extracted_text += page.extract_text() + "\n\n"
+
+        if not extracted_text.strip():
+            await update_status(status_msg, "❌ Error: No text found in the PDF (it might be an image).")
+            return
+
+        # Split into chunks to respect translation API limits (approx 4500 chars)
+        import textwrap
+        chunks = textwrap.wrap(extracted_text, width=4000, break_long_words=False, replace_whitespace=False)
+
+        translated_text = ""
+        # We process chunks serially for PDF to avoid blowing up free APIs with massive documents
+        for chunk in chunks:
+            translated_chunk = await translate_text(chunk, lang_code)
+            translated_text += translated_chunk + "\n"
+
+        await update_status(status_msg, "ɢᴇɴᴇʀᴀᴛɪɴɢ ɴᴇᴡ ᴘᴅꜰ ꜰɪʟᴇ...")
+
+        # Generate new PDF with FPDF
+        def create_pdf():
+            pdf = FPDF()
+            pdf.add_page()
+            font_path = os.path.abspath("fonts/Mukta.ttf")
+            pdf.add_font("Mukta", "", font_path, uni=True)
+            pdf.set_font("Mukta", size=12)
+
+            # FPDF requires string encoding handling for multi_cell
+            pdf.multi_cell(0, 8, translated_text)
+            pdf.output(new_pdf_path)
+
+        await asyncio.to_thread(create_pdf)
+
+        await update_status(status_msg, "ᴜᴘʟᴏᴀᴅɪɴɢ ᴛʀᴀɴsʟᴀᴛᴇᴅ ᴘᴅꜰ...")
+        start_time = time.time()
+
+        await doc_msg.reply_document(
+            document=new_pdf_path,
+            caption="✨ Document Translated Successfully!",
+            progress=progress_callback,
+            progress_args=(status_msg, start_time, "ᴜᴘʟᴏᴀᴅɪɴɢ ᴘᴅꜰ")
+        )
+        await status_msg.delete()
+
+    except Exception as e:
+        print(f"Error processing PDF: {e}")
+        await update_status(status_msg, f"❌ An error occurred: {str(e)}")
+    finally:
+        for p in [orig_pdf_path, new_pdf_path]:
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except:
+                    pass
 
 @app.on_callback_query(filters.regex("^(menu|extract)_"))
 async def main_menu_callback(client: Client, callback_query: CallbackQuery):
@@ -370,30 +488,37 @@ async def review_callback(client: Client, callback_query: CallbackQuery):
         asyncio.create_task(finalize_video(client, user_id))
 
 async def process_video(client: Client, video_msg: Message, status_msg: Message, action: str, lang_code: str):
-    # Temporary file paths
     user_id = video_msg.from_user.id
 
-    # Store session info
-    timestamp = int(time.time())
-    SESSIONS[user_id] = {
+    # Update existing session info (preserving extract_track and orig_video_path)
+    session = SESSIONS.get(user_id, {})
+    timestamp = session.get("timestamp", int(time.time()))
+
+    session.update({
         "timestamp": timestamp,
         "video_msg": video_msg,
         "status_msg": status_msg,
         "action": action,
         "lang_code": lang_code,
-        "orig_video_path": f"/tmp/input_{timestamp}.mp4",
         "audio_path": f"/tmp/audio_{timestamp}.wav",
         "transcription_result": None
-    }
+    })
+
+    # In case there was no pre-existing session/download
+    if "orig_video_path" not in session:
+        session["orig_video_path"] = f"/tmp/input_{timestamp}.mp4"
+
+    SESSIONS[user_id] = session
 
     try:
-        # 1. Download Video
-        start_time = time.time()
-        await video_msg.download(
-            file_name=SESSIONS[user_id]["orig_video_path"],
-            progress=progress_callback,
-            progress_args=(status_msg, start_time, "ᴅᴏᴡɴʟᴏᴀᴅɪɴɢ ᴠɪᴅᴇᴏ")
-        )
+        # 1. Download Video (if not already downloaded during analysis)
+        if not os.path.exists(SESSIONS[user_id]["orig_video_path"]):
+            start_time = time.time()
+            await video_msg.download(
+                file_name=SESSIONS[user_id]["orig_video_path"],
+                progress=progress_callback,
+                progress_args=(status_msg, start_time, "ᴅᴏᴡɴʟᴏᴀᴅɪɴɢ ᴠɪᴅᴇᴏ")
+            )
 
         extract_track = SESSIONS[user_id].get("extract_track")
 

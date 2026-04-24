@@ -8,5 +8,5 @@ class Config:
     OWNER_ID = int(os.environ.get("OWNER_ID", "7660990923"))
 
     # Telegram API ID and API HASH from my.telegram.org
-    TELEGRAM_API_ID = int(os.environ.get("TELEGRAM_API", "28891870"))
-    TELEGRAM_API_HASH = os.environ.get("TELEGRAM_HASH", "ffc3794690bf254d2867ac58fd293a60")
+    TELEGRAM_API_ID = int(os.environ.get("TELEGRAM_API", "0"))
+    TELEGRAM_API_HASH = os.environ.get("TELEGRAM_HASH", "")
