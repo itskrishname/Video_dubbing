@@ -5,10 +5,7 @@ import time
 import ffmpeg
 import whisper
 import edge_tts
-from pdf2image import convert_from_path
-import pytesseract
-from PIL import Image, ImageDraw, ImageFont
-import textwrap
+import fitz
 from deep_translator import GoogleTranslator
 from indic_transliteration import sanscript
 from pyrogram import Client, filters
@@ -338,101 +335,74 @@ async def process_pdf_callback(client: Client, callback_query: CallbackQuery):
             progress_args=(status_msg, start_time, "ᴅᴏᴡɴʟᴏᴀᴅɪɴɢ ᴘᴅꜰ")
         )
 
-        await update_status(status_msg, "ᴘʀᴏᴄᴇssɪɴɢ ᴘᴅꜰ ᴠɪsᴜᴀʟʟʏ (ᴏᴄʀ)... ᴛʜɪs ᴡɪʟʟ ᴛᴀᴋᴇ ᴛɪᴍᴇ ⏳")
+        await update_status(status_msg, "ᴘʀᴏᴄᴇssɪɴɢ ᴘᴅꜰ sᴛʀᴜᴄᴛᴜʀᴇ... ⏳")
 
-        async def process_visual_pdf():
-            images = convert_from_path(orig_pdf_path)
+        await update_status(status_msg, "ᴘʀᴏᴄᴇssɪɴɢ ᴘᴅꜰ sᴛʀᴜᴄᴛᴜʀᴇ... ⏳")
+
+        def extract_blocks():
+            doc = fitz.open(orig_pdf_path)
+            all_blocks = []
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                blocks = page.get_text("blocks")
+                for b in blocks:
+                    if b[6] == 0:
+                        text = b[4].strip()
+                        if text:
+                            # Save rect as tuple to avoid fitz objects crossing threads later
+                            all_blocks.append({
+                                "page_num": page_num,
+                                "rect": (b[0], b[1], b[2], b[3]),
+                                "text": text
+                            })
+            doc.close()
+            return all_blocks
+
+        all_blocks = await asyncio.to_thread(extract_blocks)
+
+        if not all_blocks:
+            raise Exception("No text found to translate. The PDF might consist purely of flattened images.")
+
+        await update_status(status_msg, "ᴛʀᴀɴsʟᴀᴛɪɴɢ ᴛᴇxᴛ...")
+
+        sem = asyncio.Semaphore(10)
+        async def fetch_trans(b):
+            async with sem:
+                trans = await translate_text(b["text"], lang_code)
+                b["translated"] = trans
+                return b
+
+        tasks = [fetch_trans(b) for b in all_blocks]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        await update_status(status_msg, "ʀᴇʙᴜɪʟᴅɪɴɢ ᴘᴅꜰ...")
+
+        def rebuild_pdf():
+            doc = fitz.open(orig_pdf_path)
             font_path = os.path.abspath("fonts/Mukta.ttf")
-            try:
-                font = ImageFont.truetype(font_path, 20)
-            except:
-                font = ImageFont.load_default()
+            font_name = "Mukta"
 
-            processed_images = []
+            for page_num in range(len(doc)):
+                doc[page_num].insert_font(fontname=font_name, fontfile=font_path)
 
-            for img in images:
-                draw = ImageDraw.Draw(img)
-                # Use pytesseract to get data dict
-                data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+            for b in all_blocks:
+                if "translated" in b and b["translated"]:
+                    page = doc[b["page_num"]]
+                    rect = fitz.Rect(*b["rect"])
+                    page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
+                    page.insert_textbox(
+                        rect,
+                        b["translated"],
+                        fontsize=11,
+                        fontname=font_name,
+                        color=(0, 0, 0),
+                        align=0
+                    )
 
-                # Group words into blocks to maintain context for translation
-                blocks = {}
-                for i in range(len(data['text'])):
-                    if int(data['conf'][i]) > 30 and data['text'][i].strip() != '':
-                        block_num = data['block_num'][i]
-                        if block_num not in blocks:
-                            blocks[block_num] = {
-                                'text': [],
-                                'x': data['left'][i],
-                                'y': data['top'][i],
-                                'w': 0,
-                                'h': 0,
-                                'max_right': 0,
-                                'max_bottom': 0
-                            }
+            doc.save(new_pdf_path)
+            doc.close()
 
-                        b = blocks[block_num]
-                        b['text'].append(data['text'][i])
-                        b['x'] = min(b['x'], data['left'][i])
-                        b['y'] = min(b['y'], data['top'][i])
-                        b['max_right'] = max(b['max_right'], data['left'][i] + data['width'][i])
-                        b['max_bottom'] = max(b['max_bottom'], data['top'][i] + data['height'][i])
-
-                # Translate and draw blocks
-                for b_id, b in blocks.items():
-                    original_text = " ".join(b['text'])
-                    if not original_text.strip():
-                        continue
-
-                    b['w'] = b['max_right'] - b['x']
-                    b['h'] = b['max_bottom'] - b['y']
-
-                    # Draw white rectangle over the original text
-                    draw.rectangle([b['x'], b['y'], b['max_right'], b['max_bottom']], fill="white")
-
-                # We need to gather translations concurrently so it doesn't take hours
-                # Extract all text blocks
-                block_list = list(blocks.values())
-
-                # Fetch translations using semaphore
-                sem = asyncio.Semaphore(5)
-                async def fetch_trans(text):
-                    async with sem:
-                        return await translate_text(text, lang_code)
-
-                tasks = [fetch_trans(" ".join(b['text'])) for b in block_list]
-                translated_texts = await asyncio.gather(*tasks, return_exceptions=True)
-
-                for idx, b in enumerate(block_list):
-                    t_text = translated_texts[idx]
-                    if isinstance(t_text, Exception):
-                        t_text = " ".join(b['text'])
-
-                    # Wrap text to fit the bounding box
-                    # Approximate chars per line based on box width and font size (avg 10px per char)
-                    chars_per_line = max(10, int(b['w'] / 10))
-                    wrapped_text = textwrap.fill(t_text, width=chars_per_line)
-
-                    draw.text((b['x'], b['y']), wrapped_text, fill="black", font=font)
-
-                processed_images.append(img)
-
-            if processed_images:
-                processed_images[0].save(
-                    new_pdf_path, "PDF" ,resolution=100.0, save_all=True, append_images=processed_images[1:]
-                )
-            else:
-                raise Exception("Failed to process any images from PDF.")
-
-
-        def run_visual_sync():
-            # Create a new event loop for the background thread to handle async gathers
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(process_visual_pdf())
-            loop.close()
-
-        await asyncio.to_thread(run_visual_sync)
+        await asyncio.to_thread(rebuild_pdf)
 
         await update_status(status_msg, "ᴜᴘʟᴏᴀᴅɪɴɢ ᴛʀᴀɴsʟᴀᴛᴇᴅ ᴘᴅꜰ...")
         start_time = time.time()
