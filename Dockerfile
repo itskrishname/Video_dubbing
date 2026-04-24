@@ -4,12 +4,16 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Install required system dependencies: FFMPEG and Git
+# Install required system dependencies: FFMPEG, Git, Poppler (for pdf2image), and Tesseract OCR
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ffmpeg \
        git \
        wget \
+       poppler-utils \
+       tesseract-ocr \
+       tesseract-ocr-eng \
+       tesseract-ocr-hin \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory

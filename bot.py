@@ -6,6 +6,8 @@ import ffmpeg
 import whisper
 import edge_tts
 import PyPDF2
+from pdf2image import convert_from_path
+import pytesseract
 from fpdf import FPDF
 from deep_translator import GoogleTranslator
 from indic_transliteration import sanscript
@@ -343,10 +345,24 @@ async def process_pdf_callback(client: Client, callback_query: CallbackQuery):
         with open(orig_pdf_path, "rb") as f:
             reader = PyPDF2.PdfReader(f)
             for page in reader.pages:
-                extracted_text += page.extract_text() + "\n\n"
+                page_text = page.extract_text()
+                if page_text:
+                    extracted_text += page_text + "\n\n"
 
         if not extracted_text.strip():
-            await update_status(status_msg, "❌ Error: No text found in the PDF (it might be an image).")
+            await update_status(status_msg, "🔍 ɴᴏ ᴛᴇxᴛ ꜰᴏᴜɴᴅ. ʀᴜɴɴɪɴɢ ᴏᴄʀ (ᴛʜɪs ᴍɪɢʜᴛ ᴛᴀᴋᴇ ᴀ ᴡʜɪʟᴇ)...")
+            # PDF might be an image or scanned document. Run OCR.
+            def extract_ocr():
+                ocr_text = ""
+                images = convert_from_path(orig_pdf_path)
+                for img in images:
+                    ocr_text += pytesseract.image_to_string(img) + "\n\n"
+                return ocr_text
+
+            extracted_text = await asyncio.to_thread(extract_ocr)
+
+        if not extracted_text.strip():
+            await update_status(status_msg, "❌ Error: Could not extract any text or images from the PDF.")
             return
 
         # Split into chunks to respect translation API limits (approx 4500 chars)
