@@ -37,7 +37,7 @@ cd <repo-folder>
 ```
 
 **3. Configure your Bot:**
-- Open `config.py` and ensure your `BOT_TOKEN` is set, or define it in the `docker-compose.yml` file under the `environment:` section.
+- Open `docker-compose.yml` and set your `BOT_TOKEN` under the `environment:` section. (Your API ID, API Hash, and Owner ID have already been pre-configured for you).
 
 **4. Start the Bot:**
 Run the following command to build the image and start the bot in the background:

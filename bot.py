@@ -6,6 +6,8 @@ import ffmpeg
 import whisper
 import edge_tts
 import fitz
+from pdf2image import convert_from_path
+import pytesseract
 from deep_translator import GoogleTranslator
 from indic_transliteration import sanscript
 from pyrogram import Client, filters
@@ -355,13 +357,55 @@ async def process_pdf_callback(client: Client, callback_query: CallbackQuery):
                                 "rect": (b[0], b[1], b[2], b[3]),
                                 "text": text
                             })
+
+            # Fallback to OCR if no digital text is found
+            if not all_blocks:
+                images = convert_from_path(orig_pdf_path)
+                for page_num, img in enumerate(images):
+                    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+
+                    # Group words into blocks to maintain context for translation
+                    blocks_dict = {}
+                    for i in range(len(data['text'])):
+                        if int(data['conf'][i]) > 30 and data['text'][i].strip() != '':
+                            block_num = data['block_num'][i]
+                            if block_num not in blocks_dict:
+                                blocks_dict[block_num] = {
+                                    'text': [],
+                                    'x0': data['left'][i],
+                                    'y0': data['top'][i],
+                                    'x1': 0,
+                                    'y1': 0
+                                }
+
+                            b = blocks_dict[block_num]
+                            b['text'].append(data['text'][i])
+                            b['x0'] = min(b['x0'], data['left'][i])
+                            b['y0'] = min(b['y0'], data['top'][i])
+                            b['x1'] = max(b['x1'], data['left'][i] + data['width'][i])
+                            b['y1'] = max(b['y1'], data['top'][i] + data['height'][i])
+
+                    # Convert to PyMuPDF rect coordinate scaling (approximate based on standard PDF size)
+                    # pdf2image converts at 200dpi by default. We need to scale OCR coords down to fitz pts (72dpi).
+                    scale = 72 / 200
+
+                    for b_id, b in blocks_dict.items():
+                        text = " ".join(b['text']).strip()
+                        if text:
+                            all_blocks.append({
+                                "page_num": page_num,
+                                "rect": (b['x0'] * scale, b['y0'] * scale, b['x1'] * scale, b['y1'] * scale),
+                                "text": text
+                            })
+
             doc.close()
             return all_blocks
 
+        await update_status(status_msg, "ᴘʀᴏᴄᴇssɪɴɢ ᴘᴅꜰ sᴛʀᴜᴄᴛᴜʀᴇ & ᴏᴄʀ... ⏳")
         all_blocks = await asyncio.to_thread(extract_blocks)
 
         if not all_blocks:
-            raise Exception("No text found to translate. The PDF might consist purely of flattened images.")
+            raise Exception("No text found to translate. The PDF might consist purely of flattened images, and OCR failed.")
 
         await update_status(status_msg, "ᴛʀᴀɴsʟᴀᴛɪɴɢ ᴛᴇxᴛ...")
 
